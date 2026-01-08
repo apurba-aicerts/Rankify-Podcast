@@ -1,0 +1,4 @@
+.env
+podcast_env/
+__pycache__/
+.vscode/
