@@ -5,7 +5,7 @@ from typing import Optional
 from schemas.podcast import PodcastScript
 from prompts.podcast import PODCAST_SYSTEM_INSTRUCTION
 from core.gemini_client import run_gemini_agent
-
+from audio.google_tts import MultiSpeakerTTS
 # ------------------------------------------------------------------------------
 # Logging Configuration
 # ------------------------------------------------------------------------------
@@ -128,7 +128,31 @@ Make money blogging. Choose from several options to monetize your blog.
     script = await generate_podcast_script(input_text)
 
     if script:
-        print(script)
+
+        tts = MultiSpeakerTTS()
+        # Build speaker names (assumes 2 speakers, but works for more)
+        speaker_names = [speaker.name for speaker in script.speakers]
+
+        dialogue_lines = "\n".join(
+            f"{turn.speaker}: {turn.text}"
+            for turn in script.dialogue
+        )
+
+        dialogue_text = f"""TTS the following conversation between {", ".join(speaker_names)}:
+        {dialogue_lines}
+        """
+
+        speaker_voice_mapping = {
+            speaker_names[0]: "Kore",
+            speaker_names[1]: "Puck"
+        }
+        tts.generate_tts(
+            dialogue=dialogue_text,
+            speaker_voice_map=speaker_voice_mapping,
+            output_file="podcast_output.wav"
+        )
+        print(dialogue_text)
+        
         print_podcast_script(script)
     else:
         print("❌ Failed to generate podcast dialogue.")
