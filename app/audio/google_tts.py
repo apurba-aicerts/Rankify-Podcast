@@ -11,7 +11,7 @@
 #         wf.writeframes(pcm)
 
 # # Initialize client with API key
-# client = genai.Client(api_key="AIzaSyAE3xr4aZPaaFxH1JfG_HMAk047mzvwS3s")  # <- Replace with your key
+# client = genai.Client(api_key="")  # <- Replace with your key
 
 # prompt = """TTS the following conversation between Joe and Jane:
 # Joe: How's it going today Jane?
