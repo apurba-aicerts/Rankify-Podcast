@@ -1150,7 +1150,7 @@ act (hipaa), 2025. Accessed: 2025-03-14.
         print("❌ No input provided. Exiting.")
         return
 
-    selected_voice = ["Kore", "Puck"]
+    selected_voice = ["kore", "puck"]
     script = await generate_podcast_script(input_text=input_text, 
                                            speaker_voices=selected_voice,
                                            num_speakers=2)
