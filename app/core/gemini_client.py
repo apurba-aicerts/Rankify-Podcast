@@ -83,6 +83,8 @@ async def run_gemini_agent(
     # 2. Generate Gemini-compatible schema from Pydantic model
     try:
         response_schema = pydantic_to_gemini_schema(real_output_type)
+        # print("--------------------")
+        # print(response_schema)
     except Exception as e:
         logger.error(f"Failed to generate schema for {real_output_type.__name__}: {e}")
         return None

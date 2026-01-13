@@ -196,7 +196,7 @@ class MultiSpeakerTTS:
         self,
         dialogue: str,
         speaker_voice_map: Dict[str, str],
-        tts_model: str,
+        tts_model: str = "gemini-2.5-pro-preview-tts",
         output_file: str = "out.wav",
     ) -> dict:
         """

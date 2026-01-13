@@ -30,7 +30,7 @@ class DialogueTurn(BaseModel):
 class PodcastScript(BaseModel):
     title: str = Field(description="Catchy podcast episode title")
     description: str = Field(description="Short episode description")
-    speakers: List[Speaker] = Field(description="List of speakers in this podcast")
+    speakers: List[Speaker] = Field(description="List of speakers in this podcast in the same order as the voice name are provided")
     dialogue: List[DialogueTurn] = Field(
         description="Ordered list of dialogue turns between speakers"
     )
