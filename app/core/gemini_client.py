@@ -128,7 +128,8 @@ async def run_gemini_agent(
             response.raise_for_status()
             
             response_data = response.json()
-            
+            # print(response_data)  # Debug: print the full response
+
             # Extract text from response
             candidates = response_data.get("candidates", [])
             if not candidates:
@@ -142,6 +143,18 @@ async def run_gemini_agent(
             
             # 6. Validate and Parse Result
             result = real_output_type.model_validate_json(json_content)
+
+            model_version = response_data.get('modelVersion', model)  # Fallback to param
+            usage_metadata = response_data.get("usageMetadata", {})
+            prompt_tokens = usage_metadata.get("promptTokenCount", 0)
+            completion_tokens = usage_metadata.get("candidatesTokenCount", 0)
+            total_tokens = usage_metadata.get("totalTokenCount", 0)
+            thoughts_tokens = usage_metadata.get("thoughtsTokenCount", 0)
+            
+            approx_price = (prompt_tokens * 0.000002 + (completion_tokens + thoughts_tokens) * 0.000012)  # Example pricing
+            logger.info(f"Approximate Gemini Cost: ${approx_price:.6f}")
+            logger.info(f"Model: {model_version}, Tokens - prompt={prompt_tokens}, completion={completion_tokens}, thoughts={thoughts_tokens}, total={total_tokens}")
+
             return result
 
         except (requests.RequestException, ValueError, ValidationError, KeyError, IndexError) as e:
