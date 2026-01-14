@@ -4,7 +4,7 @@ from typing import Optional
 
 from schemas.podcast import PodcastScript
 from prompts.podcast import podcast_system_instruction
-from core.gemini_client import run_gemini_agent
+from core.gemini_client import run_gemini_agent, build_speaker_voice_mapping
 from audio.google_tts import MultiSpeakerTTS
 # ------------------------------------------------------------------------------
 # Logging Configuration
@@ -1155,6 +1155,10 @@ act (hipaa), 2025. Accessed: 2025-03-14.
                                            speaker_voices=selected_voice,
                                            num_speakers=2)
 
+    print("✅ Podcast script generated successfully.")
+
+    print(script)
+    print(f"Speakers: {[speaker.name for speaker in script.speakers]}")
     # import json
     # from pathlib import Path
 
@@ -1182,22 +1186,23 @@ act (hipaa), 2025. Accessed: 2025-03-14.
         {dialogue_lines}
         """
 
-        # Available voices (extend as needed)
-        VOICE_POOL = ["Kore", "Puck", "Nova", "Alloy", "Echo", "Fable"]
-
         # Dynamically assign voices
         speaker_voice_mapping = {
-            speaker: selected_voice[i % len(VOICE_POOL)]
-            for i, speaker in enumerate(speaker_names)
+            speaker.name: speaker.voice_id
+            for speaker in script.speakers
         }
-
+        print(f"before validate {speaker_voice_mapping}")
+        speaker_voice_mapping = build_speaker_voice_mapping(script)
+        print("✅ Speaker to voice mapping:")
+        for speaker, voice_id in speaker_voice_mapping.items():
+            print(f"  {speaker}: {voice_id}")
         # tts.generate_tts(
         #     dialogue=dialogue_text,
         #     speaker_voice_map=speaker_voice_mapping,
         #     output_file="netcom_podcast_speaker_output.wav"
         # )
 
-        print(dialogue_text)
+        # print(dialogue_text)
         
         print_podcast_script(script)
     else:

@@ -354,7 +354,7 @@ from typing import Dict
 
 from schemas.podcast import PodcastScript
 from prompts.podcast import podcast_system_instruction
-from core.gemini_client import run_gemini_agent
+from core.gemini_client import run_gemini_agent, build_speaker_voice_mapping
 from audio.google_tts import MultiSpeakerTTS
 
 # ------------------------------------------------------------------
@@ -425,20 +425,22 @@ with st.sidebar:
         "Gemini Text Model",
         [
             "gemini-3-pro-preview",
-            "gemini-2.5-pro-preview",
-            "gemini-2.0-flash",
+            # "gemini-2.5",
+            # "gemini-2.0-flash",
         ],
     )
 
     tts_model = st.selectbox(
         "Gemini TTS Model",
         [
-            "gemini-2.5-pro-preview-tts",
             "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-pro-preview-tts",
+
         ],
     )
 
-    num_speakers = st.slider("Number of Speakers", 2, 6, 2)
+    # num_speakers = st.slider("Number of Speakers", 2, 6, 2)
+    num_speakers = 2  # Fixed number of speakers
     temperature = st.slider("Creativity", 0.0, 1.0, 0.7)
 
     st.divider()
@@ -497,11 +499,11 @@ if st.button("🚀 Generate Podcast Audio"):
         else:
             st.session_state.script = script
 
-            speaker_voice_map = {
-                speaker.name: selected_voices[i]
-                for i, speaker in enumerate(script.speakers)
-            }
-
+            # speaker_voice_map = {
+            #     speaker.name: selected_voices[i]
+            #     for i, speaker in enumerate(script.speakers)
+            # }
+            speaker_voice_map = build_speaker_voice_mapping(script)
             with st.spinner("🔊 Generating multi-speaker audio…"):
                 tts = MultiSpeakerTTS()
 

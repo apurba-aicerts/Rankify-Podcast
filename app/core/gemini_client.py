@@ -4,6 +4,7 @@ import asyncio
 import logging
 import requests
 from typing import Type, TypeVar, Optional, Any, Dict, Union
+from schemas.podcast import PodcastScript
 from pydantic import BaseModel, ValidationError
 from utils.schema_adapter import pydantic_to_gemini_schema
 
@@ -183,3 +184,22 @@ async def run_gemini_agent(
                 return None
                 
     return None
+
+def build_speaker_voice_mapping(script: PodcastScript) -> dict[str, str]:
+    speaker_voice_mapping = {}
+    voice_index = 0
+    num_speakers = len(script.speakers)
+
+    for turn in script.dialogue:
+        speaker = turn.speaker
+
+        # Assign voice on first appearance
+        if speaker not in speaker_voice_mapping:
+            speaker_voice_mapping[speaker] = script.speakers[voice_index].voice_id
+            voice_index += 1
+
+            # Stop once all speakers are assigned
+            if voice_index == num_speakers:
+                break
+
+    return speaker_voice_mapping

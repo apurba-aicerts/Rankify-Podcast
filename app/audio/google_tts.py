@@ -160,8 +160,8 @@ class MultiSpeakerTTS:
     All decisions (model, voices) must be resolved by the caller.
     """
 
-    def __init__(self, api_key: str | None = None):
-        api_key = api_key or os.getenv("GEMINI_API_KEY")
+    def __init__(self):
+        api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is missing")
 
@@ -257,21 +257,51 @@ def main():
     Minimal example to verify TTS works.
     """
 
-    dialogue_text = """
-TTS the following conversation between Host and Guest:
+    dialogue_text = """TTS the following conversation between Maya and Liam:
+Maya: You know, for the last few years, we’ve gotten really used to AI that talks. We ask a question, it writes a poem or summarizes a document. It feels like magic.
 
-Host: Welcome to the show! Today we are discussing autonomous AI agents.
-Guest: Thanks for having me. This topic is getting very exciting lately.
-Host: Absolutely. The pace of innovation is incredible.
+Liam: It does. But it’s a very specific kind of magic. It’s passive. It’s waiting for you to prompt it, and its output is usually just... text.
+
+Maya: Right. But looking at this new research on Manus AI, it feels like we’re turning a corner. We’re moving from AI that talks to AI that... acts?
+
+Liam: Exactly. That is the core promise of Manus AI. It was introduced in early 2025 by a Chinese startup called Monica.im. And the tagline they use is really telling. They say it bridges the gap between "mind" and "hand."
+
+Maya: Mind and hand. That’s a beautiful way to put it. So, if GPT-4 is the mind, Manus is trying to be the hand?
+
+Liam: Precisely. Think about the difference between a consultant and an executive assistant. A consultant—like a traditional Large Language Model—gives you advice. You ask, "How do I plan a trip to Paris?" and it gives you a list of ideas.
+
+Maya: And then I have to go open twenty tabs and actually book everything.
+
+Liam: Right. But Manus is designed as an autonomous agent. In that same scenario, it wouldn't just give you advice. It would autonomously plan the itinerary, go out to the web, gather the specific flight and hotel details, and present you with a finalized plan ready to go. It executes the workflow.
+
+Maya: It’s doing the clicking and the searching for me. That sounds like a massive leap in complexity.
+
+Liam: It is. And the metrics back that up. There’s a benchmark called GAIA—it tests an AI’s ability to use tools and solve real-world problems. It’s notoriously difficult.
+
+Maya: How did Manus do?
+
+Liam: It reportedly crushed it. It outperformed GPT-4 and set a new record, scoring over 65%. That’s significant because it shows the system isn't just hallucinating answers; it’s reasoning through steps to get a job done.
+
+Maya: It’s interesting you mention reasoning. The research paper calls this a glimpse into the future of "General Purpose AI Agents." It sounds like they’re positioning this as a stepping stone toward AGI—artificial general intelligence.
+
+Liam: I think that’s a fair assessment. When you have an AI that can handle tasks across healthcare, finance, gaming, and manufacturing without needing hand-holding for every single step... you’re looking at a new paradigm of work.
+
+Maya: It changes the human role, doesn't it? We stop being the operators and start being the... managers?
+
+Liam: That’s the vision. Instead of micromanaging the software, you provide the high-level intention. You say "Fix this financial report," and the "hand" of the AI goes and does it. Manus is really the first credible signal that this future is arriving faster than we thought.
+
+Maya: A world where the machine doesn't just think, but does. A fascinating, if slightly intimidating, prospect. Thanks for breaking it down, Liam.
+
+Liam: My pleasure, Maya.
 """
 
     speaker_voice_map = {
-        "Host": "Kore",
-        "Guest": "Puck",
+        "Maya": "achernar",
+        "Liam": "enceladus",
     }
 
     tts_model = "gemini-2.5-pro-preview-tts"
-    output_file = "sample_podcast.wav"
+    output_file = "sample_podcast_8.wav"
 
     tts = MultiSpeakerTTS()
 
