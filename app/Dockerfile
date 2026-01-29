@@ -1,4 +1,6 @@
-# Use Python 3.12 for best compatibility with NumPy 2.x & PyArrow
+# Dockerfile for FastAPI Podcast API
+# Runs on port 9800
+
 FROM python:3.12-slim
 
 # Environment settings
@@ -27,12 +29,15 @@ RUN pip install --upgrade pip \
 # Copy application source
 COPY . .
 
-# Expose Streamlit port
-EXPOSE 8530
+# Create outputs directory for generated audio files
+RUN mkdir -p /app/outputs
 
-# Streamlit runtime config
-ENV STREAMLIT_SERVER_PORT=8530
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+# Expose FastAPI port
+EXPOSE 9800
 
-# Run the Streamlit app
-CMD ["streamlit", "run", "streamlit_app.py"]
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:9800/health || exit 1
+
+# Run the FastAPI app with Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9800"]
