@@ -84,7 +84,7 @@ TEXT_MODELS = [
 # ------------------------------------------------------------------
 # S3 Cleanup Configuration
 # ------------------------------------------------------------------
-S3_CLEANUP_INTERVAL_MINUTES = 15  # Run cleanup every 15 minutes
+S3_CLEANUP_INTERVAL_MINUTES = 30  # Run cleanup every 15 minutes
 S3_OBJECT_TTL_HOURS = 1           # Delete podcast files older than 1 hour
 
 
