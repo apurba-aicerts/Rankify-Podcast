@@ -11,6 +11,11 @@ All protected endpoints require `x-api-key` header:
 x-api-key: dev-api-key-12345
 ```
 
+## Audio Storage
+All generated podcast audio files are stored in **AWS S3**.  
+Endpoints return **presigned S3 URLs** (valid for 1 hour) instead of local file paths.  
+The `/audio/{job_id}` endpoint redirects (307) to a fresh presigned S3 URL.
+
 ---
 
 ## Endpoints Overview
@@ -23,10 +28,10 @@ x-api-key: dev-api-key-12345
 | GET | `/voices/sample/{voice_id}` | No | Get voice sample audio file |
 | GET | `/tts-models` | Yes | List available TTS and text models |
 | POST | `/generate-script` | Yes | Generate script only (no audio) |
-| POST | `/generate-audio-from-script` | Yes | **NEW** - Generate audio from existing script |
-| POST | `/generate-podcast` | Yes | Generate podcast, returns audio directly |
-| POST | `/generate-podcast-with-script` | Yes | **Recommended** - Returns JSON with script + audio URL |
-| GET | `/audio/{job_id}` | No | Download generated audio by job ID |
+| POST | `/generate-audio-from-script` | Yes | Generate audio from existing script (S3) |
+| POST | `/generate-podcast` | Yes | Generate podcast, returns JSON with S3 audio URL |
+| POST | `/generate-podcast-with-script` | Yes | **Recommended** - Returns JSON with script + S3 audio URL |
+| GET | `/audio/{job_id}` | No | Redirects to S3 presigned URL for audio |
 
 ---
 
@@ -132,7 +137,7 @@ curl -X GET "http://localhost:8000/tts-models" \
 
 ## 4. POST /generate-podcast-with-script ⭐ RECOMMENDED
 
-**Best endpoint for React integration** - Returns JSON with script metadata + audio download URL.
+**Best endpoint for React integration** - Returns JSON with script metadata + S3 presigned audio URL.
 
 ### Request
 ```bash
@@ -180,7 +185,7 @@ interface GeneratePodcastRequest {
       {"speaker": "Maya", "text": "Absolutely. Let's start with the basics..."}
     ]
   },
-  "audio_url": "/audio/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-e5f6-7890-abcd-ef1234567890.wav?X-Amz-Algorithm=...",
   "tts_metadata": {
     "output_file": "/path/to/file.wav",
     "input_tokens": 1500,
@@ -189,6 +194,10 @@ interface GeneratePodcastRequest {
   }
 }
 ```
+
+> **Note:** `audio_url` is now an **S3 presigned URL** (valid for 1 hour).  
+> The frontend can use it directly in an `<audio>` tag or download it.  
+> The `/audio/{job_id}` endpoint still works as a fallback (redirects to S3).
 
 ### React Integration
 ```jsx
@@ -214,18 +223,19 @@ const generatePodcast = async (inputText, voices) => {
   
   if (data.success) {
     setScript(data.script);
-    setAudioUrl(`http://localhost:8000${data.audio_url}`);
+    // audio_url is now an S3 presigned URL - use directly
+    setAudioUrl(data.audio_url);
   }
   
   setLoading(false);
 };
 
-// Display results
+// Display results - audio_url is a full S3 presigned URL
 <div>
   <h1>{script.title}</h1>
   <p>{script.description}</p>
   
-  <audio src={audioUrl} controls />
+  <audio src={audioUrl} controls crossOrigin="anonymous" />
   
   {script.dialogue.map((turn, i) => (
     <p key={i}><strong>{turn.speaker}:</strong> {turn.text}</p>
@@ -241,7 +251,7 @@ const generatePodcast = async (inputText, voices) => {
 
 This enables a workflow where you can:
 1. Generate script → preview/edit it
-2. Generate audio from the (edited) script
+2. Generate audio from the (edited) script → get S3 presigned URL
 
 ### Request
 ```bash
@@ -290,7 +300,7 @@ interface GenerateAudioFromScriptRequest {
   "success": true,
   "message": "Audio generated successfully from script",
   "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "audio_url": "/audio/a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-...wav?X-Amz-Algorithm=...",
   "script_title": "Truepix AI: The Creative Orchestrator",
   "tts_metadata": {
     "output_file": "/path/to/file.wav",
@@ -340,34 +350,54 @@ const generateAudio = async (editedScript) => {
   
   const data = await response.json();
   if (data.success) {
-    setAudioUrl(`http://localhost:8000${data.audio_url}`);
+    // audio_url is now an S3 presigned URL - use directly
+    setAudioUrl(data.audio_url);
   }
 };
 ```
 
 ---
 
-## 6. GET /audio/{job_id} - Download Audio
+## 6. POST /generate-podcast - Generate Full Podcast
+
+### Request
+Same request body as `/generate-podcast-with-script`.
+
+### Response (Success)
+```json
+{
+  "success": true,
+  "message": "Podcast generated successfully",
+  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "script": { ... },
+  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-...wav?..."
+}
+```
+
+> **Note:** This endpoint now returns JSON with an S3 presigned URL  
+> (previously it returned a streaming audio response).
+
+---
+
+## 7. GET /audio/{job_id} - Get Audio by Job ID
 
 ### Request
 ```bash
-curl -X GET "http://localhost:8000/audio/a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
+curl -L -X GET "http://localhost:8000/audio/a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
   --output podcast.wav
 ```
 
-Returns: `audio/wav` file
+**Behaviour:** Returns a **307 redirect** to the S3 presigned URL.  
+Use `-L` flag with curl to follow redirects. Browsers and `<audio>` tags follow redirects automatically.
 
 ### Important Notes on Audio URLs
 
-**MVP (Current):**
-- Audio files are stored locally in `app/outputs/`
-- URLs are **permanent** until server restart or manual cleanup
-- Files persist indefinitely
-
-**Production (Future with S3):**
-- Will use presigned URLs with expiration
-- Typical expiration: 1-24 hours
-- Frontend should download/cache audio after generation
+- Audio files are stored in **AWS S3** under the `generated-podcast/` prefix
+- Presigned URLs are **valid for 1 hour** after generation
+- The `/audio/{job_id}` endpoint generates a **fresh** presigned URL on each request
+- Audio files persist in S3 until cleaned up via the TTL cleanup function
+- Frontend should use the `audio_url` from generation responses directly (it's a full S3 presigned URL)
+- The `/audio/{job_id}` endpoint is a convenience fallback that checks S3 and redirects
 
 ---
 
@@ -387,10 +417,23 @@ Returns: `audio/wav` file
 }
 ```
 
+### 404 Not Found (Audio)
+```json
+{
+  "detail": "Audio not found for job ID: ..."
+}
+```
+
 ### 500 Internal Server Error
 ```json
 {
   "detail": "Script generation error: ..."
+}
+```
+
+```json
+{
+  "detail": "Failed to upload audio to S3: ..."
 }
 ```
 
@@ -401,7 +444,7 @@ Returns: `audio/wav` file
 ### Development
 ```bash
 cd app
-pip install fastapi uvicorn python-multipart
+pip install fastapi uvicorn python-multipart boto3 python-dotenv
 python main.py
 # or
 uvicorn main:app --reload --port 8000
@@ -412,10 +455,39 @@ Create `.env` file:
 ```
 GEMINI_API_KEY=your_gemini_api_key
 X_API_KEY=your_custom_api_key  # Optional, defaults to dev-api-key-12345
+
+# AWS S3 Configuration
+AWS_ACCESS_KEY_ID=your_aws_access_key
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+AWS_S3_BUCKET_NAME=your_s3_bucket_name
+AWS_REGION=us-east-1
 ```
 
 ### Swagger UI
 Once running, visit: `http://localhost:8000/docs`
+
+---
+
+## CORS Notes
+
+The API is configured with CORS middleware that:
+- Allows all origins (`*`) for MVP development
+- Exposes custom headers: `X-Podcast-Title`, `X-Job-Id`, `Content-Disposition`
+- S3 presigned URLs are **full external URLs** (not same-origin), so they don't trigger CORS issues from the browser — the browser fetches audio directly from S3
+- If your S3 bucket requires CORS, ensure the bucket CORS policy allows GET requests from your frontend origin
+
+### S3 Bucket CORS Policy (if needed)
+```json
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["GET"],
+    "AllowedOrigins": ["*"],
+    "ExposeHeaders": [],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
 
 ---
 
@@ -426,6 +498,6 @@ Once running, visit: `http://localhost:8000/docs`
 2. On mount: GET /tts-models → Populate model dropdown
 3. User inputs text, selects voices
 4. On submit: POST /generate-podcast-with-script
-5. Display script dialogue + play audio from audio_url
-6. Optional: Download audio via GET /audio/{job_id}
+5. Display script dialogue + play audio from S3 presigned URL (audio_url)
+6. Optional: GET /audio/{job_id} → redirects to fresh S3 presigned URL
 ```

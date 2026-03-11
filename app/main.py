@@ -7,16 +7,19 @@ Endpoints:
 - POST /generate-podcast - Generate podcast from text
 
 Authentication: x-api-key header
+
+Audio Storage: AWS S3 with presigned URLs
 """
 
 import os
+import sys
 import io
 import uuid
 import asyncio
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
@@ -24,6 +27,10 @@ from schemas.podcast import PodcastScript
 from prompts.podcast import podcast_system_instruction, voices as VOICE_DESCRIPTIONS
 from core.gemini_client import run_gemini_agent, build_speaker_voice_mapping
 from audio.google_tts import MultiSpeakerTTS
+
+# Add parent directory to path so we can import helpers
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from helpers.s3_helper import upload_file as s3_upload_file, generate_presigned_url as s3_presigned_url
 
 # ------------------------------------------------------------------
 # Configuration
@@ -35,7 +42,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VOICE_SAMPLE_DIR = os.path.join(BASE_DIR, "audio", "assets", "voice_samples")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 
-# Ensure output directory exists
+# Ensure output directory exists (still used as temp dir before S3 upload)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 AVAILABLE_VOICES = [
@@ -85,7 +92,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Rankify Podcast API",
-    description="API for generating multi-speaker podcast audio from text",
+    description="API for generating multi-speaker podcast audio from text (S3-backed storage)",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -103,6 +110,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[
+        "X-Podcast-Title",
+        "X-Job-Id",
+        "Content-Disposition",
+    ],
 )
 
 
@@ -258,8 +270,24 @@ async def generate_script_async(
     )
 
 
+def upload_to_s3_and_cleanup(local_path: str, filename: str) -> str:
+    """
+    Upload the generated podcast audio to S3 and delete the local temp file.
+    Returns the S3 presigned URL for the uploaded file.
+    """
+    try:
+        # Upload to S3
+        s3_upload_file(local_path, filename)
+        # Generate presigned URL (1 hour expiry)
+        presigned_url = s3_presigned_url(filename)
+        return presigned_url
+    finally:
+        # Always clean up the local temp file
+        cleanup_temp_file(local_path)
+
+
 def cleanup_temp_file(filepath: str):
-    """Background task to clean up temporary files."""
+    """Clean up temporary local files after S3 upload."""
     try:
         if os.path.exists(filepath):
             os.remove(filepath)
@@ -277,7 +305,8 @@ async def root():
     return {
         "status": "healthy",
         "service": "Rankify Podcast API",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "storage": "S3"
     }
 
 
@@ -288,7 +317,8 @@ async def health_check():
         "status": "healthy",
         "voice_samples_dir": os.path.exists(VOICE_SAMPLE_DIR),
         "available_voices": len(AVAILABLE_VOICES),
-        "tts_models": len(TTS_MODELS)
+        "tts_models": len(TTS_MODELS),
+        "storage": "S3"
     }
 
 
@@ -436,9 +466,8 @@ async def generate_podcast(
     """
     Generate complete podcast: script + TTS audio.
     
-    Returns the audio file directly as a streaming response.
-    For MVP, audio is generated synchronously and returned immediately.
-    In production, this would be an async job with S3 upload.
+    Audio is generated locally, uploaded to S3, and a presigned URL
+    is returned. The local temp file is cleaned up after upload.
     """
     # Validate voices
     invalid_voices = [v for v in request.speaker_voices if v.lower() not in [av.lower() for av in AVAILABLE_VOICES]]
@@ -493,9 +522,10 @@ async def generate_podcast(
             f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
         )
         
-        # Step 4: Generate TTS audio
+        # Step 4: Generate TTS audio locally (temp file)
         job_id = str(uuid.uuid4())
-        output_file = os.path.join(OUTPUT_DIR, f"podcast_{job_id}.wav")
+        audio_filename = f"podcast_{job_id}.wav"
+        output_file = os.path.join(OUTPUT_DIR, audio_filename)
         
         tts = MultiSpeakerTTS()
         tts_result = tts.generate_tts(
@@ -505,31 +535,31 @@ async def generate_podcast(
             output_file=output_file,
         )
         
-        # Step 5: Return audio file as streaming response
         if not os.path.exists(output_file):
             raise HTTPException(
                 status_code=500,
                 detail="Audio generation failed - output file not created"
             )
         
-        # Schedule cleanup after response is sent (keep for 1 hour in MVP)
-        # In production, upload to S3 and clean up immediately
-        # background_tasks.add_task(cleanup_temp_file, output_file)
+        # Step 5: Upload to S3 and get presigned URL
+        try:
+            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
+        except Exception as e:
+            # Clean up local file even on S3 upload failure
+            cleanup_temp_file(output_file)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload audio to S3: {str(e)}"
+            )
         
-        # Read file and return as streaming response
-        def iterfile():
-            with open(output_file, mode="rb") as file_like:
-                yield from file_like
-        
-        return StreamingResponse(
-            iterfile(),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f'attachment; filename="podcast_{job_id}.wav"',
-                "X-Podcast-Title": script.title.replace('"', '\\"'),
-                "X-Job-Id": job_id
-            }
-        )
+        # Step 6: Return JSON with S3 presigned URL
+        return {
+            "success": True,
+            "message": "Podcast generated successfully",
+            "job_id": job_id,
+            "script": script.model_dump(),
+            "audio_url": presigned_url,
+        }
         
     except HTTPException:
         raise
@@ -552,10 +582,8 @@ async def generate_podcast_with_metadata(
     """
     Generate complete podcast and return both the script metadata and audio.
     
-    Returns JSON with script details and a download URL for the audio.
-    
-    MVP: Audio files are stored locally and persist until manually deleted.
-    Production: Would use S3 with presigned URLs (time-limited access).
+    Returns JSON with script details and a presigned S3 URL for the audio.
+    The presigned URL is valid for 1 hour.
     """
     # Validate voices
     invalid_voices = [v for v in request.speaker_voices if v.lower() not in [av.lower() for av in AVAILABLE_VOICES]]
@@ -610,7 +638,8 @@ async def generate_podcast_with_metadata(
         )
         
         job_id = str(uuid.uuid4())
-        output_file = os.path.join(OUTPUT_DIR, f"podcast_{job_id}.wav")
+        audio_filename = f"podcast_{job_id}.wav"
+        output_file = os.path.join(OUTPUT_DIR, audio_filename)
         
         tts = MultiSpeakerTTS()
         tts_result = tts.generate_tts(
@@ -620,15 +649,33 @@ async def generate_podcast_with_metadata(
             output_file=output_file,
         )
         
+        if not os.path.exists(output_file):
+            raise HTTPException(
+                status_code=500,
+                detail="Audio generation failed - output file not created"
+            )
+        
+        # Upload to S3 and get presigned URL, clean up local file
+        try:
+            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
+        except Exception as e:
+            cleanup_temp_file(output_file)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload audio to S3: {str(e)}"
+            )
+        
         return {
             "success": True,
             "message": "Podcast generated successfully",
             "job_id": job_id,
             "script": script.model_dump(),
-            "audio_url": f"/audio/{job_id}",
+            "audio_url": presigned_url,
             "tts_metadata": tts_result
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -651,12 +698,12 @@ async def generate_audio_from_script(
     Use this endpoint when you have already generated a script via /generate-script
     and want to convert it to audio (possibly after editing).
     
-    The script object should match the format returned by /generate-script.
+    The audio is uploaded to S3 and a presigned URL (valid 1 hour) is returned.
     
     Flow:
     1. POST /generate-script → get script JSON
     2. (Optional) Edit the script in your UI
-    3. POST /generate-audio-from-script with the script → get audio
+    3. POST /generate-audio-from-script with the script → get S3 audio URL
     """
     script = request.script
     
@@ -696,9 +743,10 @@ async def generate_audio_from_script(
             f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
         )
         
-        # Generate TTS audio
+        # Generate TTS audio locally (temp file)
         job_id = str(uuid.uuid4())
-        output_file = os.path.join(OUTPUT_DIR, f"podcast_{job_id}.wav")
+        audio_filename = f"podcast_{job_id}.wav"
+        output_file = os.path.join(OUTPUT_DIR, audio_filename)
         
         tts = MultiSpeakerTTS()
         tts_result = tts.generate_tts(
@@ -714,11 +762,21 @@ async def generate_audio_from_script(
                 detail="Audio generation failed - output file not created"
             )
         
+        # Upload to S3 and get presigned URL, clean up local file
+        try:
+            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
+        except Exception as e:
+            cleanup_temp_file(output_file)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to upload audio to S3: {str(e)}"
+            )
+        
         return {
             "success": True,
             "message": "Audio generated successfully from script",
             "job_id": job_id,
-            "audio_url": f"/audio/{job_id}",
+            "audio_url": presigned_url,
             "script_title": script.title,
             "tts_metadata": tts_result
         }
@@ -735,25 +793,30 @@ async def generate_audio_from_script(
 @app.get(
     "/audio/{job_id}",
     tags=["Audio"],
-    summary="Download generated audio"
+    summary="Get audio presigned URL by job ID"
 )
 async def get_audio(job_id: str):
     """
-    Download previously generated podcast audio by job ID.
-    """
-    output_file = os.path.join(OUTPUT_DIR, f"podcast_{job_id}.wav")
+    Get a presigned S3 URL for previously generated podcast audio by job ID.
     
-    if not os.path.exists(output_file):
+    Redirects the client to the S3 presigned URL. If the audio file
+    does not exist in S3, a 404 error is returned.
+    """
+    audio_filename = f"podcast_{job_id}.wav"
+    
+    try:
+        # Verify the object exists in S3 before generating URL
+        from helpers.s3_helper import head_object as s3_head_object
+        s3_head_object(audio_filename)
+    except Exception:
         raise HTTPException(
             status_code=404,
             detail=f"Audio not found for job ID: {job_id}"
         )
     
-    return FileResponse(
-        output_file,
-        media_type="audio/wav",
-        filename=f"podcast_{job_id}.wav"
-    )
+    # Generate a fresh presigned URL and redirect
+    presigned_url = s3_presigned_url(audio_filename)
+    return RedirectResponse(url=presigned_url, status_code=307)
 
 
 # ------------------------------------------------------------------
