@@ -394,8 +394,9 @@ Use `-L` flag with curl to follow redirects. Browsers and `<audio>` tags follow 
 
 - Audio files are stored in **AWS S3** under the `generated-podcast/` prefix
 - Presigned URLs are **valid for 1 hour** after generation
-- The `/audio/{job_id}` endpoint generates a **fresh** presigned URL on each request
-- Audio files persist in S3 until cleaned up via the TTL cleanup function
+- **Audio files are automatically deleted from S3 after 1 hour** — a background cleanup task runs every 15 minutes and removes any podcast files older than 1 hour
+- Both the presigned URL **and** the actual S3 object expire/get deleted at ~1 hour
+- The `/audio/{job_id}` endpoint generates a **fresh** presigned URL on each request (only works while the file still exists in S3)
 - Frontend should use the `audio_url` from generation responses directly (it's a full S3 presigned URL)
 - The `/audio/{job_id}` endpoint is a convenience fallback that checks S3 and redirects
 

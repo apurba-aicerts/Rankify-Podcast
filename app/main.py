@@ -30,7 +30,11 @@ from audio.google_tts import MultiSpeakerTTS
 
 # Add parent directory to path so we can import helpers
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from helpers.s3_helper import upload_file as s3_upload_file, generate_presigned_url as s3_presigned_url
+from helpers.s3_helper import (
+    upload_file as s3_upload_file,
+    generate_presigned_url as s3_presigned_url,
+    delete_objects_older_than as s3_cleanup_old,
+)
 
 # ------------------------------------------------------------------
 # Configuration
@@ -78,15 +82,47 @@ TEXT_MODELS = [
 
 
 # ------------------------------------------------------------------
+# S3 Cleanup Configuration
+# ------------------------------------------------------------------
+S3_CLEANUP_INTERVAL_MINUTES = 15  # Run cleanup every 15 minutes
+S3_OBJECT_TTL_HOURS = 1           # Delete podcast files older than 1 hour
+
+
+# ------------------------------------------------------------------
 # Lifespan & App Setup
 # ------------------------------------------------------------------
+
+async def _periodic_s3_cleanup():
+    """
+    Background coroutine that periodically deletes S3 podcast objects
+    older than S3_OBJECT_TTL_HOURS. Runs every S3_CLEANUP_INTERVAL_MINUTES.
+    """
+    while True:
+        await asyncio.sleep(S3_CLEANUP_INTERVAL_MINUTES * 60)
+        try:
+            deleted = await asyncio.to_thread(
+                s3_cleanup_old, S3_OBJECT_TTL_HOURS
+            )
+            if deleted:
+                print(f"🧹 S3 cleanup: deleted {deleted} podcast file(s) older than {S3_OBJECT_TTL_HOURS}h")
+        except Exception as e:
+            print(f"⚠️  S3 cleanup error: {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Podcast API starting up...")
+    # Launch periodic S3 cleanup task
+    cleanup_task = asyncio.create_task(_periodic_s3_cleanup())
+    print(f"🧹 S3 cleanup scheduled: every {S3_CLEANUP_INTERVAL_MINUTES}min, TTL {S3_OBJECT_TTL_HOURS}h")
     yield
-    # Shutdown
+    # Shutdown – cancel the background cleanup task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     print("🛑 Podcast API shutting down...")
 
 
