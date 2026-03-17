@@ -143,7 +143,7 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "*"  # Allow all for MVP - restrict in production
     ],
-    allow_credentials=True,
+    allow_credentials=False,  # Must be False when allow_origins includes "*"
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=[
