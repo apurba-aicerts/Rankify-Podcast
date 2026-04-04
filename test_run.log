@@ -1,0 +1,66 @@
+20:34:11 | DEBUG    | asyncio                        | Using proactor: IocpProactor
+20:34:11 | INFO     | test_main                      | ========================================================================
+20:34:11 | INFO     | test_main                      |   PODCAST PIPELINE — TEST RUN
+20:34:11 | INFO     | test_main                      | ========================================================================
+20:34:11 | INFO     | test_main                      | ========================================================================
+20:34:11 | INFO     | test_main                      |   STAGE 1 — Fetch ElevenLabs voices
+20:34:11 | INFO     | test_main                      | ========================================================================
+20:34:11 | INFO     | clients.elevenlabs_client      | Fetching available voices from ElevenLabs…
+20:34:13 | INFO     | clients.elevenlabs_client      | Fetched 21 voices from ElevenLabs.
+20:34:13 | INFO     | test_main                      | Fetched 21 voices in 1.82s
+20:34:13 | DEBUG    | test_main                      |   voice_id=CwhRBWXzGAHq8TQ4Fs17        name=Roger - Laid-Back, Casual, Resonant  desc=Easy going and perfect for casual conversations.
+20:34:13 | DEBUG    | test_main                      |   voice_id=EXAVITQu4vr4xnSDxMaL        name=Sarah - Mature, Reassuring, Confident  desc=Young adult woman with a confident and warm, mature quality and a reassuring, professional tone.
+20:34:13 | DEBUG    | test_main                      |   voice_id=FGY2WhTYpPnrIDTdsKH5        name=Laura - Enthusiast, Quirky Attitude  desc=This young adult female voice delivers sunny enthusiasm with a quirky attitude.
+20:34:13 | DEBUG    | test_main                      |   voice_id=IKne3meq5aSn9XLyUdCD        name=Charlie - Deep, Confident, Energetic  desc=A young Australian male with a confident and energetic voice.
+20:34:13 | DEBUG    | test_main                      |   voice_id=JBFqnCBsd6RMkjVDRZzb        name=George - Warm, Captivating Storyteller  desc=Warm resonance that instantly captivates listeners.
+20:34:13 | DEBUG    | test_main                      |   … (16 more)
+20:34:13 | INFO     | test_main                      | Using voices for test: ['Roger - Laid-Back, Casual, Resonant (CwhRBWXzGAHq8TQ4Fs17)', 'Sarah - Mature, Reassuring, Confident (EXAVITQu4vr4xnSDxMaL)']
+20:34:13 | INFO     | test_main                      | ========================================================================
+20:34:13 | INFO     | test_main                      |   STAGE 2 — Generate podcast script with Gemini
+20:34:13 | INFO     | test_main                      | ========================================================================
+20:34:13 | INFO     | core.podcast_pipeline          | Generating podcast script — speakers=2  model=gemini-3-pro-preview  temperature=0.70
+20:34:13 | DEBUG    | clients.gemini_client          | Generated Gemini schema for PodcastScript
+20:34:13 | INFO     | clients.gemini_client          | Gemini request — model=gemini-3-pro-preview  attempt=1/3
+20:34:58 | INFO     | clients.gemini_client          | Gemini usage — model=gemini-3.1-pro-preview  prompt=872  completion=715  thoughts=4454  total=6041
+20:34:58 | INFO     | clients.gemini_client          | Gemini response validated successfully.
+20:34:58 | INFO     | core.podcast_pipeline          | Script generated — title='From Chatbots to Doers: The Rise of Manus AI'  speakers=['Sarah', 'Roger']  turns=12
+20:34:58 | INFO     | test_main                      | Script generated in 45.43s
+20:34:58 | INFO     | test_main                      | TITLE:       From Chatbots to Doers: The Rise of Manus AI
+20:34:58 | INFO     | test_main                      | DESCRIPTION: An exploration of Manus AI, the breakthrough autonomous agent that bridges the gap between thinking and executing.
+20:34:58 | INFO     | test_main                      | SPEAKERS (2):
+20:34:58 | INFO     | test_main                      |   Sarah                 voice_id=EXAVITQu4vr4xnSDxMaL
+20:34:58 | INFO     | test_main                      |   Roger                 voice_id=CwhRBWXzGAHq8TQ4Fs17
+20:34:58 | INFO     | test_main                      | DIALOGUE TURNS: 12
+20:34:58 | INFO     | test_main                      |   [01] Sarah          : Have you ever asked an AI to help you plan a trip, and it just hands you a massi…
+20:34:58 | INFO     | test_main                      |   [02] Roger          : Oh, absolutely. It says, 'here are five great hotels,' but then you still have t…
+20:34:58 | INFO     | test_main                      |   [03] Sarah          : Exactly. It gives you the theory, but leaves you with the actual work. But there…
+20:34:58 | INFO     | test_main                      |   [04] Roger          : The hand. That makes perfect sense. Manus is literally Latin for hand. And that …
+20:34:58 | INFO     | test_main                      |   [05] Sarah          : Right. Manus is what we call a general-purpose autonomous agent. It doesn't just…
+20:34:58 | INFO     | test_main                      |   [06] Roger          : So going back to that trip planning example. Instead of just giving you a list o…
+20:34:58 | INFO     | test_main                      |   [07] Sarah          : You just give it the goal, and it executes. And what's fascinating is that this …
+20:34:58 | INFO     | test_main                      |   [08] Roger          : I have, and they're wild. For anyone who doesn't know, GAIA is this comprehensiv…
+20:34:58 | INFO     | test_main                      |   [09] Sarah          : And until recently, the record was held by OpenAI's GPT-4, which capped out at a…
+20:34:58 | INFO     | test_main                      |   [10] Roger          : Yeah, and Manus just shattered that record. Achieving state-of-the-art results o…
+20:34:58 | INFO     | test_main                      |   [11] Sarah          : It really marks a turning point for the industry. We're transitioning from AI as…
+20:34:58 | INFO     | test_main                      |   [12] Roger          : For sure. The era of the chatbot is evolving into the era of the digital doer. I…
+20:34:58 | INFO     | test_main                      | Script saved to C:\AI Certs\Rankify-Podcast\test_script.json
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | INFO     | test_main                      |   STAGE 3 — Build speaker → voice map
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | DEBUG    | core.podcast_pipeline          | Speaker → voice map: {'Sarah': 'EXAVITQu4vr4xnSDxMaL', 'Roger': 'CwhRBWXzGAHq8TQ4Fs17'}
+20:34:58 | INFO     | test_main                      |   Sarah                → EXAVITQu4vr4xnSDxMaL
+20:34:58 | INFO     | test_main                      |   Roger                → CwhRBWXzGAHq8TQ4Fs17
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | INFO     | test_main                      |   STAGE 4 — Build dialogue turns for ElevenLabs
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | DEBUG    | core.podcast_pipeline          | Built 12 dialogue turns for ElevenLabs.
+20:34:58 | INFO     | test_main                      | Built 12 turns
+20:34:58 | DEBUG    | test_main                      |   [01] voice_id=EXAVITQu4vr4xnSDxMaL        text=Have you ever asked an AI to help you plan a trip, and it ju…
+20:34:58 | DEBUG    | test_main                      |   [02] voice_id=CwhRBWXzGAHq8TQ4Fs17        text=Oh, absolutely. It says, 'here are five great hotels,' but t…
+20:34:58 | DEBUG    | test_main                      |   [03] voice_id=EXAVITQu4vr4xnSDxMaL        text=Exactly. It gives you the theory, but leaves you with the ac…
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | INFO     | test_main                      |   ALL STAGES PASSED ✅
+20:34:58 | INFO     | test_main                      | ========================================================================
+20:34:58 | INFO     | test_main                      | Total time: 47.26s
+20:34:58 | INFO     | test_main                      | Script JSON: C:\AI Certs\Rankify-Podcast\test_script.json
+20:34:58 | INFO     | test_main                      | Full log: C:\AI Certs\Rankify-Podcast\test_run.log
