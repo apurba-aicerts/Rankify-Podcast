@@ -71,7 +71,12 @@ with st.sidebar:
 
     gemini_model = st.selectbox(
         "Gemini Model",
-        [GEMINI_DEFAULT_MODEL],
+        [   "gemini-flash-latest",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-pro-latest",
+            "gemini-3.1-pro-preview"
+        ],
     )
 
     temperature = st.slider(

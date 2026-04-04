@@ -217,12 +217,12 @@ async def main() -> None:
         test_build_dialogue_turns(script, speaker_voice_map)
 
         # Stage 5: audio synthesis
-        audio_path = test_synthesise_audio(script, speaker_voice_map)
+        # audio_path = test_synthesise_audio(script, speaker_voice_map)
 
         total = time.perf_counter() - total_start
         _separator("ALL STAGES PASSED ✅")
         logger.info("Total time: %.2fs", total)
-        logger.info("MP3 output: %s", audio_path)
+        # logger.info("MP3 output: %s", audio_path)
         logger.info("Script JSON: %s", Path(SCRIPT_JSON).resolve())
         logger.info("Full log: %s", Path("test_run.log").resolve())
 

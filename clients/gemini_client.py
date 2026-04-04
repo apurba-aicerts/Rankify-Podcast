@@ -39,9 +39,6 @@ def _get_api_key() -> str:
         )
     return key
 
-
-# ── Internal: schema conversion ───────────────────────────────────────────────
-
 # def _pydantic_to_gemini_schema(model_class: Type[BaseModel]) -> dict:
 #     """
 #     Convert a Pydantic model's JSON schema to a Gemini-compatible schema dict.

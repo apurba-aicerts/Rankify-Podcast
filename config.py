@@ -4,7 +4,7 @@ Global constants and default settings for the podcast generation pipeline.
 """
 
 # ── Gemini ────────────────────────────────────────────────────────────────────
-GEMINI_DEFAULT_MODEL       = "gemini-3-pro-preview"
+GEMINI_DEFAULT_MODEL       = "gemini-pro-latest"
 GEMINI_DEFAULT_TEMPERATURE = 0.7
 GEMINI_DEFAULT_RETRIES     = 2
 GEMINI_INITIAL_BACKOFF     = 2.0          # seconds; doubles on each retry
