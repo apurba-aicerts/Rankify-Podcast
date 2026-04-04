@@ -14,6 +14,10 @@
 #         description="Ordered list of dialogue turns between speakers"
 #     )
 
+"""
+podcast.py is the schema for the podcast script.
+"""
+
 from pydantic import BaseModel, Field
 from typing import List
 
