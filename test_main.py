@@ -85,9 +85,13 @@ def _separator(label: str) -> None:
 def _print_script_summary(script) -> None:
     logger.info("TITLE:       %s", script.title)
     logger.info("DESCRIPTION: %s", script.description)
+    logger.info("STYLE:       %s", getattr(script, "podcast_style", ""))
+    logger.info("TONE:        %s", getattr(script, "tone", ""))
+    logger.info("INTERACTION: %s", getattr(script, "interaction_mode", ""))
     logger.info("SPEAKERS (%d):", len(script.speakers))
     for spk in script.speakers:
-        logger.info("  %-20s  voice_id=%s", spk.name, spk.voice_id)
+        role = getattr(spk, "role", "")
+        logger.info("  %-20s  role=%-8s  voice_id=%s", spk.name, role, spk.voice_id)
     logger.info("DIALOGUE TURNS: %d", len(script.dialogue))
     for i, turn in enumerate(script.dialogue, 1):
         preview = turn.text[:80].replace("\n", " ")
@@ -121,10 +125,15 @@ async def test_generate_script(speaker_voices: list[dict]) -> object:
     _separator("STAGE 2 — Generate podcast script with Gemini")
     t0 = time.perf_counter()
 
+    speaker_roles = ["Host", "Expert"] + ["Co-host"] * max(0, NUM_SPEAKERS - 2)
     script = await generate_script(
         input_text=SAMPLE_INPUT,
         speaker_voices=speaker_voices,
         num_speakers=NUM_SPEAKERS,
+        speaker_roles=speaker_roles[:NUM_SPEAKERS],
+        podcast_style="Interview",
+        tone="Engaging",
+        interaction_mode="Q/A",
         model=GEMINI_DEFAULT_MODEL,
         temperature=GEMINI_DEFAULT_TEMPERATURE,
     )
@@ -192,6 +201,7 @@ def test_synthesise_audio(script, speaker_voice_map: dict) -> str:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main() -> None:
+    """Run a full end-to-end pipeline test with verbose logging."""
     _separator("PODCAST PIPELINE — TEST RUN")
     total_start = time.perf_counter()
 

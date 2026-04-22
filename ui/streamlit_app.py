@@ -88,6 +88,27 @@ with st.sidebar:
     )
 
     st.divider()
+    st.header("🧩 Podcast Customisation")
+
+    podcast_style = st.selectbox(
+        "Podcast Style",
+        ["Interview", "News", "Storytelling"],
+        index=0,
+    )
+
+    tone = st.selectbox(
+        "Tone",
+        ["Formal", "Casual", "Engaging"],
+        index=2,
+    )
+
+    interaction_mode = st.selectbox(
+        "Multi-speaker Interaction",
+        ["Q/A", "Debate", "Explanation"],
+        index=0,
+    )
+
+    st.divider()
     st.header("🔊 Speakers & Voices")
 
     num_speakers = st.slider(
@@ -98,6 +119,7 @@ with st.sidebar:
     )
 
     selected_voice_dicts: list[dict] = []
+    speaker_roles: list[str] = []
     for i in range(num_speakers):
         select_key = f"voice_select_{i}"
         previously_taken = {
@@ -132,6 +154,19 @@ with st.sidebar:
         else:
             st.caption("Preview unavailable for this voice.")
 
+        role_key = f"role_select_{i}"
+        default_role_index = 0 if i == 0 else (1 if i == 1 else 2)
+        role = st.selectbox(
+            f"Speaker {i + 1} Role",
+            ["Host", "Expert", "Co-host"],
+            index=default_role_index,
+            key=role_key,
+        )
+        speaker_roles.append(role)
+
+    if num_speakers > 0 and "Host" not in speaker_roles:
+        st.warning("At least one speaker should be the Host. (Recommended)")
+
 # ── Main: input ───────────────────────────────────────────────────────────────
 
 st.subheader("📄 Source Content")
@@ -163,6 +198,10 @@ if st.button("🚀 Generate Podcast", type="primary"):
                         input_text=input_text,
                         speaker_voices=selected_voice_dicts,
                         num_speakers=num_speakers,
+                        speaker_roles=speaker_roles,
+                        podcast_style=podcast_style,
+                        tone=tone,
+                        interaction_mode=interaction_mode,
                         output_path=output_path,
                         model=gemini_model,
                         temperature=temperature,

@@ -29,18 +29,26 @@ async def generate_script(
     input_text: str,
     speaker_voices: list[dict],
     num_speakers: int,
+    speaker_roles: list[str],
+    podcast_style: str,
+    tone: str,
+    interaction_mode: str,
     model: str = GEMINI_DEFAULT_MODEL,
     temperature: float = GEMINI_DEFAULT_TEMPERATURE,
     retries: int = GEMINI_DEFAULT_RETRIES,
 ) -> PodcastScript:
     """
-    Generate a PodcastScript from raw input text using the Gemini API.
+    Generate a `PodcastScript` from source text using Gemini structured output.
 
     Args:
         input_text:     Raw content to convert into a podcast conversation.
         speaker_voices: List of voice dicts (voice_id, name, description)
                         — one per speaker, in the order assigned to speakers.
         num_speakers:   Number of speakers the script must contain.
+        speaker_roles:  Role per speaker (e.g., Host/Expert/Co-host), length == num_speakers.
+        podcast_style:  Episode format style (Interview/News/Storytelling).
+        tone:           Episode tone (Formal/Casual/Engaging).
+        interaction_mode: How speakers interact (Q/A/Debate/Explanation).
         model:          Gemini model name.
         temperature:    Generation temperature.
         retries:        Number of retry attempts on LLM failure.
@@ -59,6 +67,10 @@ async def generate_script(
     system_instruction = build_podcast_prompt(
         num_speakers=num_speakers,
         speaker_voices=speaker_voices,
+        speaker_roles=speaker_roles,
+        podcast_style=podcast_style,
+        tone=tone,
+        interaction_mode=interaction_mode,
     )
 
     script = await run_gemini_agent(
@@ -166,17 +178,25 @@ async def run_podcast_pipeline(
     input_text: str,
     speaker_voices: list[dict],
     num_speakers: int,
+    speaker_roles: list[str],
+    podcast_style: str,
+    tone: str,
+    interaction_mode: str,
     output_path: str = ELEVENLABS_DEFAULT_OUTPUT,
     model: str = GEMINI_DEFAULT_MODEL,
     temperature: float = GEMINI_DEFAULT_TEMPERATURE,
 ) -> tuple[PodcastScript, str]:
     """
-    Run the complete podcast pipeline end-to-end.
+    Run script generation + audio synthesis end-to-end.
 
     Args:
         input_text:     Raw source content.
         speaker_voices: Voice dicts (voice_id, name, description) per speaker.
         num_speakers:   Number of speakers.
+        speaker_roles:  Role per speaker, length == num_speakers.
+        podcast_style:  Episode format style.
+        tone:           Episode tone.
+        interaction_mode: Interaction pattern across speakers.
         output_path:    MP3 output path.
         model:          Gemini model name.
         temperature:    Generation temperature.
@@ -186,7 +206,17 @@ async def run_podcast_pipeline(
     """
     logger.info("=== Podcast pipeline START ===")
 
-    script           = await generate_script(input_text, speaker_voices, num_speakers, model, temperature)
+    script           = await generate_script(
+        input_text=input_text,
+        speaker_voices=speaker_voices,
+        num_speakers=num_speakers,
+        speaker_roles=speaker_roles,
+        podcast_style=podcast_style,
+        tone=tone,
+        interaction_mode=interaction_mode,
+        model=model,
+        temperature=temperature,
+    )
     speaker_voice_map = build_speaker_voice_map(script)
     audio_path       = synthesise_audio(script, speaker_voice_map, output_path)
 

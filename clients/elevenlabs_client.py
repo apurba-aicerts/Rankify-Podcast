@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # ── Internal: build client ────────────────────────────────────────────────────
 
 def _get_client() -> ElevenLabs:
+    """Create an authenticated ElevenLabs client from `ELEVENLABS_API_KEY`."""
     api_key = os.getenv("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError(

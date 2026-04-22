@@ -4,7 +4,13 @@ Pydantic models for the podcast generation pipeline.
 """
 
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Literal
+
+
+PodcastStyle = Literal["Interview", "News", "Storytelling"]
+PodcastTone = Literal["Formal", "Casual", "Engaging"]
+InteractionMode = Literal["Q/A", "Debate", "Explanation"]
+SpeakerRole = Literal["Host", "Expert", "Co-host"]
 
 
 class DialogueTurn(BaseModel):
@@ -30,6 +36,9 @@ class Speaker(BaseModel):
     voice_id: str = Field(
         description="ElevenLabs voice ID assigned to this speaker."
     )
+    role: SpeakerRole = Field(
+        description="The speaker's assigned role in the conversation."
+    )
 
 
 class PodcastScript(BaseModel):
@@ -37,6 +46,15 @@ class PodcastScript(BaseModel):
 
     title: str = Field(description="Catchy, descriptive podcast episode title.")
     description: str = Field(description="One or two sentence episode summary.")
+    podcast_style: PodcastStyle = Field(
+        description="Overall episode format style selected by the user."
+    )
+    tone: PodcastTone = Field(
+        description="Overall episode tone selected by the user."
+    )
+    interaction_mode: InteractionMode = Field(
+        description="How speakers interact (e.g., Q/A, Debate, Explanation)."
+    )
     speakers: List[Speaker] = Field(
         description=(
             "Unique speakers ordered by their first appearance in the dialogue. "

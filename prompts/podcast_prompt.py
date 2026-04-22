@@ -115,6 +115,10 @@ Design goals:
 def build_podcast_prompt(
     num_speakers: int,
     speaker_voices: list[dict],
+    speaker_roles: list[str],
+    podcast_style: str,
+    tone: str,
+    interaction_mode: str,
 ) -> str:
     """
     Build the Gemini system instruction for podcast script generation.
@@ -129,9 +133,22 @@ def build_podcast_prompt(
     Returns:
         System instruction string ready for the Gemini API.
     """
+    if len(speaker_voices) != num_speakers:
+        raise ValueError(
+            f"speaker_voices must have length {num_speakers}, got {len(speaker_voices)}"
+        )
+    if len(speaker_roles) != num_speakers:
+        raise ValueError(
+            f"speaker_roles must have length {num_speakers}, got {len(speaker_roles)}"
+        )
+
     voice_block = "\n".join(
-        f"  - voice_id: \"{v['voice_id']}\"  |  {v['name']} — {v['description']}"
-        for v in speaker_voices
+        f"  - speaker_index: {i + 1}\n"
+        f"    voice_id: \"{v['voice_id']}\"\n"
+        f"    voice_name: \"{v['name']}\"\n"
+        f"    voice_personality: \"{v['description']}\"\n"
+        f"    assigned_role: \"{speaker_roles[i]}\""
+        for i, v in enumerate(speaker_voices)
     )
 
     return f"""
@@ -139,6 +156,20 @@ You are a senior podcast writer and audio storyteller specialising in deep,
 content-faithful conversations. Your job is to turn source material into a
 podcast episode where listeners come away genuinely understanding the full
 content — not a summary of it.
+
+════════════════════════════════════════════════════════════════════
+EPISODE CUSTOMISATION (USER-SELECTED)
+════════════════════════════════════════════════════════════════════
+
+You MUST follow these episode-level controls:
+  - podcast_style: "{podcast_style}"   (one of: Interview, News, Storytelling)
+  - tone: "{tone}"                    (one of: Formal, Casual, Engaging)
+  - interaction_mode: "{interaction_mode}" (one of: Q/A, Debate, Explanation)
+
+Reflect these choices in:
+  - pacing, wording, and structure
+  - how turns are distributed across speakers
+  - how strongly the host moderates vs. narrates
 
 ════════════════════════════════════════════════════════════════════
 ABSOLUTE RULE — CONTENT FIDELITY & ZERO HALLUCINATION
@@ -190,7 +221,7 @@ The following ElevenLabs voices are assigned, with personality cues:
 
 Use the voice personality descriptions to shape each speaker's:
   - Human name (realistic, invented — e.g. Alex, Maya, Priya, James)
-  - Role in the conversation
+  - Role in the conversation (MUST match assigned_role above exactly)
   - Tone, energy, pacing, and authority level
 
 Voice IDs are INTERNAL only — never mention them in the dialogue.
@@ -219,6 +250,29 @@ Write for the ear, not the page:
     are welcome where the source supports them
   - Light interruptions and clarifications add realism
   - Avoid monologues longer than 5-6 sentences; break them up
+
+Interaction mode rules (STRICT):
+  - If interaction_mode == "Q/A":
+      * The Host primarily asks questions and frames transitions
+      * The Expert primarily answers with depth grounded in the source
+      * The Co-host primarily clarifies, challenges gently, and summarises
+  - If interaction_mode == "Debate":
+      * The Expert and Co-host (or other non-host speakers) may disagree,
+        but ONLY about interpretations or trade-offs present in the source
+      * The Host moderates, keeps it moving, and forces grounding in the source
+  - If interaction_mode == "Explanation":
+      * One speaker (usually the Expert) explains concepts step-by-step
+      * Other speakers ask clarifying questions and do quick "teach-back" recaps
+
+Style rules (STRICT):
+  - If podcast_style == "Interview": structured Q/A segments, host-led curiosity.
+  - If podcast_style == "News": crisp segments, strong signposting, minimal banter.
+  - If podcast_style == "Storytelling": narrative arc, scenes/sequence, vivid but source-grounded.
+
+Tone rules (STRICT):
+  - If tone == "Formal": precise language, fewer colloquialisms, calm pacing.
+  - If tone == "Casual": more contractions, friendly phrasing, conversational energy.
+  - If tone == "Engaging": more hooks, curiosity, vivid analogies grounded in the source.
 
 Explanation techniques (use freely):
   - Analogies and comparisons grounded in the source
@@ -264,7 +318,10 @@ OUTPUT FORMAT (REQUIRED)
 Output only valid JSON matching the PodcastScript schema:
   - title        (string) — catchy, specific to the source content
   - description  (string) — 1-2 sentence episode summary
-  - speakers     (list of objects with name and voice_id fields)
+  - podcast_style (string) — MUST equal "{podcast_style}"
+  - tone          (string) — MUST equal "{tone}"
+  - interaction_mode (string) — MUST equal "{interaction_mode}"
+  - speakers     (list of objects with name, voice_id, and role fields)
   - dialogue     (list of objects with speaker and text fields)
 
 Do NOT include explanations, markdown fences, or any text outside

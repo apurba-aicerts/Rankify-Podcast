@@ -8,7 +8,7 @@ Text → Gemini script → ElevenLabs multi-speaker MP3.
 podcast_app/
 ├── config.py                    # Constants & defaults
 ├── schemas/
-│   └── podcast_schema.py        # PodcastScript, Speaker, DialogueTurn
+│   └── podcast_schema.py        # PodcastScript, Speaker (+role), DialogueTurn
 ├── prompts/
 │   └── podcast_prompt.py        # build_podcast_prompt()
 ├── clients/
@@ -39,6 +39,12 @@ ELEVENLABS_API_KEY=your_elevenlabs_key
 ```bash
 streamlit run ui/streamlit_app.py
 ```
+
+In the UI you can also customise:
+- **podcast style**: Interview / News / Storytelling
+- **tone**: Formal / Casual / Engaging
+- **roles per speaker**: Host / Expert / Co-host
+- **interaction mode**: Q/A / Debate / Explanation
 
 **CLI test (debug all stages):**
 ```bash

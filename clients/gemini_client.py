@@ -31,6 +31,7 @@ T = TypeVar("T", bound=BaseModel)
 # ── Internal: load API key ────────────────────────────────────────────────────
 
 def _get_api_key() -> str:
+    """Return `GEMINI_API_KEY` from environment or raise a helpful error."""
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         raise RuntimeError(
@@ -76,8 +77,7 @@ async def run_gemini_agent(
     initial_backoff: float = GEMINI_INITIAL_BACKOFF,
 ) -> T:
     """
-    Call the Gemini API with a system instruction and user input, returning
-    a validated Pydantic model instance.
+    Call Gemini with structured output and return a validated Pydantic model.
 
     Args:
         system_instruction: System prompt string.
