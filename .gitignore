@@ -4,5 +4,5 @@ __pycache__/
 .vscode/
 rankify_pod/
 test_run.log/
-podcast_output.mp3/
+podcast_output.mp3
 test_output.mp3

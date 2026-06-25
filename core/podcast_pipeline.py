@@ -33,6 +33,7 @@ async def generate_script(
     podcast_style: str,
     tone: str,
     interaction_mode: str,
+    target_duration_min: int,
     model: str = GEMINI_DEFAULT_MODEL,
     temperature: float = GEMINI_DEFAULT_TEMPERATURE,
     retries: int = GEMINI_DEFAULT_RETRIES,
@@ -71,6 +72,7 @@ async def generate_script(
         podcast_style=podcast_style,
         tone=tone,
         interaction_mode=interaction_mode,
+        target_duration_min=target_duration_min,
     )
 
     script = await run_gemini_agent(
@@ -182,6 +184,7 @@ async def run_podcast_pipeline(
     podcast_style: str,
     tone: str,
     interaction_mode: str,
+    target_duration_min: int,
     output_path: str = ELEVENLABS_DEFAULT_OUTPUT,
     model: str = GEMINI_DEFAULT_MODEL,
     temperature: float = GEMINI_DEFAULT_TEMPERATURE,
@@ -214,6 +217,7 @@ async def run_podcast_pipeline(
         podcast_style=podcast_style,
         tone=tone,
         interaction_mode=interaction_mode,
+        target_duration_min=target_duration_min,
         model=model,
         temperature=temperature,
     )

@@ -119,6 +119,7 @@ def build_podcast_prompt(
     podcast_style: str,
     tone: str,
     interaction_mode: str,
+    target_duration_min: int,
 ) -> str:
     """
     Build the Gemini system instruction for podcast script generation.
@@ -165,11 +166,13 @@ You MUST follow these episode-level controls:
   - podcast_style: "{podcast_style}"   (one of: Interview, News, Storytelling)
   - tone: "{tone}"                    (one of: Formal, Casual, Engaging)
   - interaction_mode: "{interaction_mode}" (one of: Q/A, Debate, Explanation)
+  - target_duration_minutes: {target_duration_min} (SOFT target, not a hard limit)
 
 Reflect these choices in:
   - pacing, wording, and structure
   - how turns are distributed across speakers
   - how strongly the host moderates vs. narrates
+  - overall spoken length (aim close to target without padding or cutting facts)
 
 ════════════════════════════════════════════════════════════════════
 ABSOLUTE RULE — CONTENT FIDELITY & ZERO HALLUCINATION
@@ -203,11 +206,19 @@ You MUST follow these rules without exception:
    Never compress an important idea into one sentence if the source
    gives it a paragraph.
 
-5. DO NOT FORCE LENGTH OR BREVITY
-   The dialogue length is determined entirely by the source material.
-   - Short source → short dialogue
-   - Dense, complex source → long, thorough dialogue
-   Never pad with filler. Never cut to meet a length target.
+5. LENGTH CONTROL (SOFT TARGET)
+   Aim for approximately {target_duration_min} minutes of spoken audio.
+   - Do NOT pad with filler to get longer.
+   - Do NOT omit source content to get shorter.
+   - If the source is too dense for the target, increase compression by:
+       * reducing chit-chat
+       * tighter turns
+       * fewer rephrasings
+     but still cover every concept from the source.
+   - If the source is too short for the target, do not invent content; instead:
+       * add clarifying questions that restate source points
+       * add source-grounded examples/analogies
+       * include brief recaps
 
 ════════════════════════════════════════════════════════════════════
 SPEAKERS & VOICES

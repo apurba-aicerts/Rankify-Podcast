@@ -134,6 +134,7 @@ async def test_generate_script(speaker_voices: list[dict]) -> object:
         podcast_style="Interview",
         tone="Engaging",
         interaction_mode="Q/A",
+        target_duration_min=10,
         model=GEMINI_DEFAULT_MODEL,
         temperature=GEMINI_DEFAULT_TEMPERATURE,
     )

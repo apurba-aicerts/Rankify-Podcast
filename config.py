@@ -16,6 +16,6 @@ ELEVENLABS_OUTPUT_FORMAT   = "mp3_44100_128"   # native mp3, 44.1 kHz, 128 kbps
 ELEVENLABS_DEFAULT_OUTPUT  = "podcast_output.mp3"
 
 # ── Podcast pipeline ──────────────────────────────────────────────────────────
-MIN_SPEAKERS               = 2
+MIN_SPEAKERS               = 1
 MAX_SPEAKERS               = 4
 DEFAULT_NUM_SPEAKERS       = 2

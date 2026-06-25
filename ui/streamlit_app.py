@@ -112,6 +112,13 @@ with st.form("podcast_form", border=False):
         podcast_style = st.selectbox("Style", ["Interview", "News", "Storytelling"], index=0)
         tone = st.selectbox("Tone", ["Formal", "Casual", "Engaging"], index=2)
         interaction_mode = st.selectbox("Interaction", ["Q/A", "Debate", "Explanation"], index=0)
+        target_duration_min = st.slider(
+            "Duration (minutes)",
+            min_value=3,
+            max_value=30,
+            value=10,
+            step=1,
+        )
         num_speakers = st.slider(
             "Speakers",
             min_value=MIN_SPEAKERS,
@@ -233,6 +240,7 @@ if generate_clicked:
                         podcast_style=podcast_style,
                         tone=tone,
                         interaction_mode=interaction_mode,
+                        target_duration_min=target_duration_min,
                         output_path=output_path,
                         model=gemini_model,
                         temperature=temperature,

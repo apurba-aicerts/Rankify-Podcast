@@ -61,7 +61,7 @@ def fetch_available_voices() -> list[dict]:
             "name":        voice.name,
             "description": voice.description,
             "category":    voice.category or "",
-            "labels":      dict(voice.labels) if voice.labels else {},
+            "labels":      dict[str, str](voice.labels) if voice.labels else {},
             "preview_url": voice.preview_url or "",
         })
 
