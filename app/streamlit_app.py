@@ -76,8 +76,9 @@ with st.sidebar:
         "Gemini Text Model",
         [
             "gemini-3-pro-preview",
-            # "gemini-2.5",
-            # "gemini-2.0-flash",
+            "gemini-3.5-flash",
+            "gemini-2.5",
+            "gemini-2.0-flash",
         ],
     )
 

@@ -66,6 +66,11 @@ TEXT_MODELS = [
         "id": "gemini-3-pro-preview",
         "name": "Gemini 3 Pro Preview",
         "description": "Latest Gemini model for script generation"
+    },
+    {
+        "id": "gemini-3-flash-preview",
+        "name": "Gemini 3 Flash Preview",
+        "description": "Fast Gemini model for script generation"
     }
 ]
 
