@@ -55,7 +55,7 @@ function ProjectFormFields({
 
 export function DashboardPage() {
   const navigate = useNavigate()
-  const { data, isLoading, error } = useProjects()
+  const { data, isLoading, isFetching, error } = useProjects()
   const createProject = useCreateProject()
   const updateProject = useUpdateProject()
   const deleteProject = useDeleteProject()
@@ -67,6 +67,7 @@ export function DashboardPage() {
   const [description, setDescription] = useState('')
 
   const projects = data?.projects ?? []
+  const hasData = Boolean(data)
 
   const resetForm = () => {
     setName('')
@@ -124,7 +125,9 @@ export function DashboardPage() {
   const isBusy =
     createProject.isPending || updateProject.isPending || deleteProject.isPending
 
-  if (isLoading) {
+  // Only blank the page on the first load — keep cached UI while refetching
+  // (e.g. navigating back while podcasts are generating).
+  if (isLoading && !hasData) {
     return (
       <AppLayout>
         <LoadingOverlay message="Loading projects…" />
@@ -132,7 +135,7 @@ export function DashboardPage() {
     )
   }
 
-  if (error) {
+  if (error && !hasData) {
     return (
       <AppLayout>
         <div className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
@@ -146,7 +149,15 @@ export function DashboardPage() {
     <AppLayout>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-gray-900">Dashboard</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-3xl font-semibold tracking-tight text-gray-900">Dashboard</h1>
+            {isFetching && hasData && (
+              <span className="inline-flex items-center gap-1.5 text-xs text-gray-400">
+                <Loader className="h-3.5 w-3.5 animate-spin" />
+                Updating…
+              </span>
+            )}
+          </div>
           <p className="mt-1 text-sm text-gray-500">
             Your projects and everything produced inside them
           </p>

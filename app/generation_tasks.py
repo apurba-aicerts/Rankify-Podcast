@@ -129,18 +129,23 @@ async def run_podcast_from_script_task(
         )
 
         temp_path = APP_OUTPUT_DIR / f"temp_{podcast_id}.wav"
-        tts = MultiSpeakerTTS()
-        tts_result = tts.generate_tts(
-            dialogue=final_prompt,
-            speaker_voice_map=speaker_voice_map,
-            tts_model=tts_model,
-            output_file=str(temp_path),
-        )
 
-        if not temp_path.exists():
-            raise RuntimeError("Audio generation failed — no output file")
+        # Run blocking Gemini TTS + S3 upload off the event loop so API
+        # requests (dashboard, project polling) stay responsive.
+        def _generate_and_upload() -> tuple[dict, str]:
+            tts = MultiSpeakerTTS()
+            result = tts.generate_tts(
+                dialogue=final_prompt,
+                speaker_voice_map=speaker_voice_map,
+                tts_model=tts_model,
+                output_file=str(temp_path),
+            )
+            if not temp_path.exists():
+                raise RuntimeError("Audio generation failed — no output file")
+            key = storage.upload_podcast(str(temp_path), str(project_id), str(podcast_id))
+            return result, key
 
-        s3_key = storage.upload_podcast(str(temp_path), str(project_id), str(podcast_id))
+        tts_result, s3_key = await asyncio.to_thread(_generate_and_upload)
 
         podcast = db.get(Podcast, podcast_id)
         if podcast:

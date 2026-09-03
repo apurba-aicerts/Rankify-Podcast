@@ -6,6 +6,10 @@ export function useProjects() {
   return useQuery({
     queryKey: ['projects'],
     queryFn: projectsApi.listProjects,
+    refetchInterval: (query) => {
+      const unfinished = query.state.data?.totals.unfinished ?? 0
+      return unfinished > 0 ? 5000 : false
+    },
   })
 }
 
