@@ -7,6 +7,7 @@ Projects, Podcasts, and Podcast Scripts persisted in PostgreSQL.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -16,10 +17,12 @@ from typing import List, Optional
 from uuid import UUID
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from database import Podcast, PodcastScriptRecord, Project, Voice, get_db, init_db
@@ -80,6 +83,8 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 AVAILABLE_VOICES = list(VOICE_DESCRIPTIONS.keys())
 GEMINI_TTS_MAX_SPEAKERS = 2
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("rankify.api")
 
 
 def assert_gemini_tts_speaker_count(num_speakers: int) -> None:
@@ -92,6 +97,29 @@ def assert_gemini_tts_speaker_count(num_speakers: int) -> None:
                 f"(got {num_speakers})"
             ),
         )
+
+
+def parse_uploaded_document(filename: str, file_obj) -> str:
+    """Extract text from upload; always map parse failures to HTTP 400."""
+    try:
+        return extract_text(filename, file_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Unexpected document parse failure for %s", filename)
+        raise HTTPException(
+            status_code=400,
+            detail="Could not read uploaded document. Check the file and try again.",
+        ) from None
+
+
+def _validation_detail(exc: RequestValidationError) -> str:
+    parts: list[str] = []
+    for err in exc.errors():
+        loc = ".".join(str(x) for x in err.get("loc", ()) if x != "body")
+        msg = err.get("msg", "Invalid value")
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) or "Invalid request"
 
 
 @asynccontextmanager
@@ -121,7 +149,39 @@ app.add_middleware(
 )
 
 
-async def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(status_code=422, content={"detail": _validation_detail(exc)})
+
+
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_exception_handler(_request: Request, exc: SQLAlchemyError):
+    logger.exception("Database error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "A database error occurred. Please try again."},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Let FastAPI/Starlette HTTPException keep its normal response path.
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None),
+        )
+    logger.exception("Unhandled error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected server error occurred. Please try again."},
+    )
+
+
+async def verify_api_key(x_api_key: Optional[str] = Header(None, alias="x-api-key")):
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="Missing API key. Send header x-api-key.")
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return x_api_key
@@ -486,9 +546,24 @@ async def delete_project(
     _: str = Depends(verify_api_key),
 ):
     project = get_project_or_404(db, project_id)
-    storage.delete_project_podcasts(str(project_id))
-    db.delete(project)
-    db.commit()
+    try:
+        storage.delete_project_podcasts(str(project_id))
+    except Exception:
+        logger.exception("Failed to delete S3 audio for project %s", project_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete project audio files. Please try again.",
+        ) from None
+    try:
+        db.delete(project)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Failed to delete project %s from database", project_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete project. Please try again.",
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -538,10 +613,7 @@ async def generate_podcast_script(
         )
     assert_gemini_tts_speaker_count(num_speakers)
 
-    try:
-        input_text = extract_text(file.filename or "upload.txt", file.file)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    input_text = parse_uploaded_document(file.filename or "upload.txt", file.file)
 
     if len(input_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="Document text too short (min 10 chars)")
@@ -657,8 +729,12 @@ async def generate_podcast(
         )
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Podcast generation error: {exc}")
+    except Exception:
+        logger.exception("Sync podcast generation failed for project %s", project_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Podcast generation failed. Please try again.",
+        ) from None
     finally:
         if temp_path.exists():
             temp_path.unlink()
@@ -731,9 +807,9 @@ async def update_podcast(
 ):
     podcast = get_podcast_or_404(db, project_id, podcast_id)
     if body.title is not None:
-        podcast.title = body.title.strip()
+        podcast.title = body.title
     if body.description is not None:
-        podcast.description = body.description.strip() or None
+        podcast.description = body.description
     podcast.updated_at = datetime.now(timezone.utc)
     project = get_project_or_404(db, project_id)
     project.updated_at = datetime.now(timezone.utc)
@@ -750,15 +826,32 @@ async def delete_podcast(
     _: str = Depends(verify_api_key),
 ):
     podcast = get_podcast_or_404(db, project_id, podcast_id)
+    if podcast.status == "generating":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a podcast while audio is still generating",
+        )
     if podcast.s3_key:
         try:
             storage.delete_object(podcast.s3_key)
         except Exception:
-            pass
-    db.delete(podcast)
-    project = get_project_or_404(db, project_id)
-    project.updated_at = datetime.now(timezone.utc)
-    db.commit()
+            logger.exception("Failed to delete S3 object %s for podcast %s", podcast.s3_key, podcast_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete podcast audio file. Please try again.",
+            ) from None
+    try:
+        db.delete(podcast)
+        project = get_project_or_404(db, project_id)
+        project.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Failed to delete podcast %s", podcast_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete podcast. Please try again.",
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -823,10 +916,7 @@ async def create_script(
         )
     assert_gemini_tts_speaker_count(num_speakers)
 
-    try:
-        input_text = extract_text(file.filename or "upload.txt", file.file)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    input_text = parse_uploaded_document(file.filename or "upload.txt", file.file)
 
     if episode_title and episode_title.strip():
         input_text = f"Episode title: {episode_title.strip()}\n\n{input_text}"
@@ -944,8 +1034,26 @@ async def delete_script(
     _: str = Depends(verify_api_key),
 ):
     record = get_script_or_404(db, project_id, script_id)
-    db.delete(record)
-    db.commit()
+    if record.status == "generating":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a script while it is still generating",
+        )
+    if record.status == "published":
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a published script. Delete the linked podcast instead.",
+        )
+    try:
+        db.delete(record)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Failed to delete script %s", script_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete script. Please try again.",
+        ) from None
 
 
 @app.post(

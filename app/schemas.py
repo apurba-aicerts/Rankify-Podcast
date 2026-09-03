@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -14,14 +14,31 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 
+def _strip_nonempty(value: str, field: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError(f"{field} must not be empty or whitespace")
+    return cleaned
+
+
 class Speaker(BaseModel):
     name: str = Field(description="Speaker name")
     voice_id: str = Field(description="TTS voice ID")
+
+    @field_validator("name", "voice_id")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        return _strip_nonempty(value, "field")
 
 
 class DialogueTurn(BaseModel):
     speaker: str
     text: str
+
+    @field_validator("speaker", "text")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        return _strip_nonempty(value, "field")
 
 
 class PodcastScript(BaseModel):
@@ -29,6 +46,18 @@ class PodcastScript(BaseModel):
     description: str
     speakers: List[Speaker]
     dialogue: List[DialogueTurn]
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        return _strip_nonempty(value, "title")
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def strip_description(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +69,39 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=500)
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return _strip_nonempty(value, "name")
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
 
 class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = Field(None, max_length=500)
     status: Optional[str] = Field(None, pattern="^(active|archived)$")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _strip_nonempty(value, "name")
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
 
 class ProjectCounts(BaseModel):
@@ -117,6 +174,21 @@ class PodcastUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _strip_nonempty(value, "title")
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
 
 class GeneratePodcastRequest(BaseModel):
     podcast_script: PodcastScript
@@ -161,6 +233,21 @@ class ScriptUpdate(BaseModel):
     description: Optional[str] = None
     script: Optional[PodcastScript] = None
     tts_model: Optional[str] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return _strip_nonempty(value, "title")
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def validate_description(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
 
 class ScriptListResponse(BaseModel):

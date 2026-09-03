@@ -218,7 +218,7 @@ export function ProjectItemCard({ item, projectId }: ProjectItemCardProps) {
               <Pencil className="h-4 w-4" />
             </button>
           )}
-          {isPodcast && (
+          {isPodcast && !isBusy && (
             <button
               type="button"
               onClick={() => {
