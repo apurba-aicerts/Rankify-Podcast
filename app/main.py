@@ -49,6 +49,7 @@ from schemas import (
     PodcastResponse,
     PodcastScript,
     PodcastSummary,
+    PodcastUpdate,
     ProjectCreate,
     ProjectCounts,
     ProjectDetailResponse,
@@ -78,6 +79,19 @@ OUTPUT_DIR = APP_DIR / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 AVAILABLE_VOICES = list(VOICE_DESCRIPTIONS.keys())
+GEMINI_TTS_MAX_SPEAKERS = 2
+
+
+def assert_gemini_tts_speaker_count(num_speakers: int) -> None:
+    """Gemini multi-speaker TTS allows at most 2 speakers."""
+    if num_speakers < 1 or num_speakers > GEMINI_TTS_MAX_SPEAKERS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Gemini TTS supports 1–{GEMINI_TTS_MAX_SPEAKERS} speakers "
+                f"(got {num_speakers})"
+            ),
+        )
 
 
 @asynccontextmanager
@@ -522,6 +536,7 @@ async def generate_podcast_script(
             status_code=400,
             detail=f"num_speakers ({num_speakers}) must match speaker_voices length ({len(voice_list)})",
         )
+    assert_gemini_tts_speaker_count(num_speakers)
 
     try:
         input_text = extract_text(file.filename or "upload.txt", file.file)
@@ -578,6 +593,7 @@ async def generate_podcast(
         raise HTTPException(status_code=400, detail=str(exc))
 
     podcast_script = body.podcast_script
+    assert_gemini_tts_speaker_count(len(podcast_script.speakers))
     for speaker in podcast_script.speakers:
         if speaker.voice_id.lower() not in AVAILABLE_VOICES:
             raise HTTPException(
@@ -701,6 +717,31 @@ async def get_podcast(
     return podcast_to_response(podcast)
 
 
+@app.patch(
+    "/projects/{project_id}/podcasts/{podcast_id}",
+    response_model=PodcastSummary,
+    tags=["Podcasts"],
+)
+async def update_podcast(
+    project_id: UUID,
+    podcast_id: UUID,
+    body: PodcastUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    podcast = get_podcast_or_404(db, project_id, podcast_id)
+    if body.title is not None:
+        podcast.title = body.title.strip()
+    if body.description is not None:
+        podcast.description = body.description.strip() or None
+    podcast.updated_at = datetime.now(timezone.utc)
+    project = get_project_or_404(db, project_id)
+    project.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(podcast)
+    return podcast_to_summary(podcast)
+
+
 @app.delete("/projects/{project_id}/podcasts/{podcast_id}", status_code=204, tags=["Podcasts"])
 async def delete_podcast(
     project_id: UUID,
@@ -715,6 +756,8 @@ async def delete_podcast(
         except Exception:
             pass
     db.delete(podcast)
+    project = get_project_or_404(db, project_id)
+    project.updated_at = datetime.now(timezone.utc)
     db.commit()
 
 
@@ -778,6 +821,7 @@ async def create_script(
             status_code=400,
             detail=f"num_speakers ({num_speakers}) must match speaker_voices length ({len(voice_list)})",
         )
+    assert_gemini_tts_speaker_count(num_speakers)
 
     try:
         input_text = extract_text(file.filename or "upload.txt", file.file)
@@ -872,6 +916,7 @@ async def update_script(
             raise HTTPException(status_code=400, detail=str(exc))
         record.tts_model = body.tts_model
     if body.script is not None:
+        assert_gemini_tts_speaker_count(len(body.script.speakers))
         for speaker in body.script.speakers:
             if speaker.voice_id.lower() not in AVAILABLE_VOICES:
                 raise HTTPException(
@@ -928,6 +973,7 @@ async def generate_podcast_from_script(
         raise HTTPException(status_code=400, detail=str(exc))
 
     if body.script is not None:
+        assert_gemini_tts_speaker_count(len(body.script.speakers))
         for speaker in body.script.speakers:
             if speaker.voice_id.lower() not in AVAILABLE_VOICES:
                 raise HTTPException(
@@ -952,6 +998,7 @@ async def generate_podcast_from_script(
         raise HTTPException(status_code=409, detail="Script is not ready for audio generation")
 
     podcast_script = PodcastScript.model_validate(record.script)
+    assert_gemini_tts_speaker_count(len(podcast_script.speakers))
     podcast_id = uuid.uuid4()
     podcast = Podcast(
         id=podcast_id,

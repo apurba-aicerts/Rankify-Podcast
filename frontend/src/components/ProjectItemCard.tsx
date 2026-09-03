@@ -1,5 +1,14 @@
 import { useState } from 'react'
-import { AlertCircle, FileText, Headphones, Loader2, Wand2, X } from 'lucide-react'
+import {
+  AlertCircle,
+  FileText,
+  Headphones,
+  Loader2,
+  Pencil,
+  Trash2,
+  Wand2,
+  X,
+} from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import type { PodcastScript, ProjectItem } from '../types/api'
@@ -64,19 +73,78 @@ export function ProjectItemCard({ item, projectId }: ProjectItemCardProps) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [viewScriptOpen, setViewScriptOpen] = useState(false)
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [title, setTitle] = useState(item.title)
+  const [description, setDescription] = useState(item.description ?? '')
+  const [saving, setSaving] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const isScript = item.kind === 'script'
+  const isPodcast = item.kind === 'podcast'
   const isFailed = item.phase === 'failed'
   const isBusy = item.phase === 'writing_script' || item.phase === 'generating_audio'
 
-  const dismiss = async () => {
-    if (item.kind === 'script') {
-      await scriptsApi.deleteScript(projectId, item.script_id)
-    } else {
-      await podcastsApi.deletePodcast(projectId, item.id)
-    }
+  const refreshProject = async () => {
     await qc.invalidateQueries({ queryKey: ['projects', projectId] })
     await qc.invalidateQueries({ queryKey: ['projects'] })
+  }
+
+  const openRename = () => {
+    setTitle(item.title)
+    setDescription(item.description ?? '')
+    setActionError(null)
+    setRenameOpen(true)
+  }
+
+  const handleRename = async () => {
+    const trimmed = title.trim()
+    if (!trimmed || !isPodcast) return
+    setSaving(true)
+    setActionError(null)
+    try {
+      await podcastsApi.updatePodcast(projectId, item.id, {
+        title: trimmed,
+        description: description.trim(),
+      })
+      setRenameOpen(false)
+      await refreshProject()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not rename podcast.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async () => {
+    setSaving(true)
+    setActionError(null)
+    try {
+      if (isScript) {
+        await scriptsApi.deleteScript(projectId, item.script_id)
+      } else {
+        await podcastsApi.deletePodcast(projectId, item.id)
+      }
+      setDeleteOpen(false)
+      await refreshProject()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Could not delete.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const dismissFailed = async () => {
+    try {
+      if (isScript) {
+        await scriptsApi.deleteScript(projectId, item.script_id)
+      } else {
+        await podcastsApi.deletePodcast(projectId, item.id)
+      }
+      await refreshProject()
+    } catch {
+      /* ignore */
+    }
   }
 
   const statusLabel =
@@ -138,15 +206,42 @@ export function ProjectItemCard({ item, projectId }: ProjectItemCardProps) {
             <p className="mt-2 text-xs text-gray-400">{formatDate(item.created_at)}</p>
           )}
         </div>
-        {isFailed && (
-          <button
-            type="button"
-            onClick={() => void dismiss()}
-            className="rounded-lg p-1 text-gray-400 hover:bg-gray-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        )}
+
+        <div className="flex shrink-0 gap-1">
+          {isPodcast && !isBusy && (
+            <button
+              type="button"
+              onClick={openRename}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+              aria-label="Rename podcast"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          )}
+          {isPodcast && (
+            <button
+              type="button"
+              onClick={() => {
+                setActionError(null)
+                setDeleteOpen(true)
+              }}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-red-50 hover:text-red-600"
+              aria-label="Delete podcast"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
+          {isScript && isFailed && (
+            <button
+              type="button"
+              onClick={() => void dismissFailed()}
+              className="rounded-lg p-1 text-gray-400 hover:bg-gray-100"
+              aria-label="Dismiss failed script"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {item.phase === 'script_ready' && (
@@ -193,6 +288,69 @@ export function ProjectItemCard({ item, projectId }: ProjectItemCardProps) {
           onClose={() => setViewScriptOpen(false)}
         />
       )}
+
+      <Modal open={renameOpen} title="Rename podcast" onClose={() => setRenameOpen(false)}>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs font-medium text-gray-500">Title</label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-gray-500">
+              Description <span className="text-gray-400">(optional)</span>
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-xl border border-gray-200 px-4 py-3 text-sm focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+            />
+          </div>
+          {actionError && (
+            <p className="rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{actionError}</p>
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setRenameOpen(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleRename()} disabled={!title.trim() || saving}>
+            Save
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={deleteOpen}
+        title={`Delete “${item.title}”?`}
+        onClose={() => setDeleteOpen(false)}
+      >
+        <p className="text-sm text-gray-600">
+          This will permanently delete this podcast
+          {item.phase === 'ready' ? ' and its audio file' : ''}. This cannot be undone.
+        </p>
+        {actionError && (
+          <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm text-red-700">{actionError}</p>
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setDeleteOpen(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button
+            className="bg-red-600 text-white hover:bg-red-700"
+            onClick={() => void handleDelete()}
+            disabled={saving}
+          >
+            Delete podcast
+          </Button>
+        </div>
+      </Modal>
     </div>
   )
 }

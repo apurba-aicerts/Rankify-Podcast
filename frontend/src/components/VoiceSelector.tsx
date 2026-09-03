@@ -24,7 +24,7 @@ export function VoiceSelector({
   voices,
   onChange,
   minSpeakers = 1,
-  maxSpeakers = 4,
+  maxSpeakers = 2,
 }: VoiceSelectorProps) {
   const { toggle, isVoicePlaying } = useVoiceSamplePlayer(voices)
 

@@ -97,6 +97,11 @@ async def run_podcast_from_script_task(
         for speaker in podcast_script.speakers:
             speaker.voice_id = speaker.voice_id.lower()
 
+        if len(podcast_script.speakers) < 1 or len(podcast_script.speakers) > 2:
+            raise RuntimeError(
+                f"Gemini TTS supports 1–2 speakers (got {len(podcast_script.speakers)})"
+            )
+
         if podcast_id is None:
             podcast_id = uuid.uuid4()
             podcast = Podcast(

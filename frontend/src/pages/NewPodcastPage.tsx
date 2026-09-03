@@ -64,6 +64,10 @@ export function NewPodcastPage() {
       setError('Models are still loading. Please wait.')
       return false
     }
+    if (speakers.length < 1 || speakers.length > 2) {
+      setError('Gemini TTS supports 1–2 speakers only.')
+      return false
+    }
     setError(null)
     return true
   }
@@ -168,10 +172,16 @@ export function NewPodcastPage() {
             </h2>
             <div className="mt-4">
               {voices.length > 0 ? (
-                <VoiceSelector speakers={speakers} voices={voices} onChange={setSpeakers} />
+                <VoiceSelector
+                  speakers={speakers}
+                  voices={voices}
+                  onChange={setSpeakers}
+                  maxSpeakers={2}
+                />
               ) : (
                 <p className="text-sm text-gray-400">Loading voices…</p>
               )}
+              <p className="mt-2 text-xs text-gray-400">Gemini TTS supports 1–2 speakers</p>
             </div>
           </section>
         </aside>

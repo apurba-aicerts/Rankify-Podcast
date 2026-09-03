@@ -113,6 +113,11 @@ class PodcastListResponse(BaseModel):
     total: int
 
 
+class PodcastUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+
+
 class GeneratePodcastRequest(BaseModel):
     podcast_script: PodcastScript
     tts_model: str = Field(default="gemini-2.5-flash-preview-tts")
