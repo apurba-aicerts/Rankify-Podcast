@@ -1,5 +1,14 @@
 .env
 podcast_env/
 __pycache__/
+*.pyc
 .vscode/
 rankify_pod
+.DS_Store
+app/outputs/
+experiment/test_sample.bin
+experiment/output/
+frontend/node_modules/
+frontend/dist/
+experiment/
+app/voice_samples/

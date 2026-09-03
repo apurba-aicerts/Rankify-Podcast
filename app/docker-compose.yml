@@ -1,6 +1,22 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16
+    container_name: rankify-podcast-db
+    environment:
+      POSTGRES_USER: rankify
+      POSTGRES_PASSWORD: rankify
+      POSTGRES_DB: rankify_podcast
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rankify -d rankify_podcast"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   podcast-api:
     build:
       context: .
@@ -10,20 +26,25 @@ services:
       - "9800:9800"
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql://rankify:rankify@postgres:5432/rankify_podcast
     volumes:
-      # Persist generated audio files outside container
       - ./outputs:/app/outputs
-      # Mount voice samples (read-only)
-      - ./audio/assets/voice_samples:/app/audio/assets/voice_samples:ro
+      - ./voice_samples:/app/voice_samples:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9800/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+
+volumes:
+  pgdata:
 
 # Usage:
 # docker compose up -d --build
-# API available at: http://localhost:9800
-# Swagger docs at: http://localhost:9800/docs
+# API: http://localhost:9800/docs

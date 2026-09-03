@@ -1,869 +1,1113 @@
 """
-FastAPI backend for Podcast Generation MVP
+Rankify Podcast API — flat structure.
 
-Endpoints:
-- GET /voices - Available voices with sample URLs
-- GET /tts-models - Available TTS models
-- POST /generate-podcast - Generate podcast from text
-
-Authentication: x-api-key header
-
-Audio Storage: AWS S3 with presigned URLs
+Projects, Podcasts, and Podcast Scripts persisted in PostgreSQL.
 """
 
+from __future__ import annotations
+
+import json
 import os
-import sys
-import io
 import uuid
-import asyncio
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, Header, Depends, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
+from uuid import UUID
 
-from schemas.podcast import PodcastScript
-from prompts.podcast import podcast_system_instruction, voices as VOICE_DESCRIPTIONS
-from core.gemini_client import run_gemini_agent, build_speaker_voice_mapping
-from audio.google_tts import MultiSpeakerTTS
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
+from sqlalchemy import func, text
+from sqlalchemy.orm import Session
 
-# Add parent directory to path so we can import helpers
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from helpers.s3_helper import (
-    upload_file as s3_upload_file,
-    generate_presigned_url as s3_presigned_url,
-    delete_objects_older_than as s3_cleanup_old,
+from database import Podcast, PodcastScriptRecord, Project, Voice, get_db, init_db
+from document_parser import extract_text
+from gemini_client import build_speaker_voice_mapping, run_gemini_agent
+from generation_tasks import schedule_podcast_generation, schedule_script_generation
+from gemini_models import (
+    MODELS_LIMIT,
+    get_cache_fetched_at,
+    get_default_text_model,
+    get_text_models,
+    get_tts_models,
+    refresh_models,
+    validate_text_model,
+    validate_tts_model,
 )
+from google_tts import MultiSpeakerTTS
+from podcast_prompts import podcast_system_instruction, voices as VOICE_DESCRIPTIONS
+from schemas import (
+    GeneratePodcastFromScriptRequest,
+    GeneratePodcastRequest,
+    GeneratePodcastResponse,
+    GeneratePodcastScriptResponse,
+    ModelInfo,
+    ModelsResponse,
+    PodcastListResponse,
+    PodcastResponse,
+    PodcastScript,
+    PodcastSummary,
+    ProjectCreate,
+    ProjectCounts,
+    ProjectDetailResponse,
+    ProjectItem,
+    ProjectListResponse,
+    ProjectResponse,
+    ProjectSummary,
+    ProjectUpdate,
+    ScriptCreateResponse,
+    ScriptListResponse,
+    ScriptUpdate,
+    TextModelsResponse,
+    TtsModelsResponse,
+    VoiceInfo,
+    VoicesResponse,
+)
+import storage
 
-# ------------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------------
+APP_DIR = Path(__file__).resolve().parent
+REPO_ROOT = APP_DIR.parent
+load_dotenv(REPO_ROOT / ".env")
+load_dotenv(APP_DIR / ".env")
 
-API_KEY = os.getenv("X_API_KEY", "dev-api-key-12345")  # Set in production
+API_KEY = os.getenv("X_API_KEY", "dev-api-key-12345")
+VOICE_SAMPLE_DIR = APP_DIR / "voice_samples"
+OUTPUT_DIR = APP_DIR / "outputs"
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VOICE_SAMPLE_DIR = os.path.join(BASE_DIR, "audio", "assets", "voice_samples")
-OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
-
-# Ensure output directory exists (still used as temp dir before S3 upload)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-AVAILABLE_VOICES = [
-    "achernar", "achird", "algenib", "algieba", "alnilam",
-    "aoede", "autonoe", "callirrhoe", "charon", "despina",
-    "enceladus", "erinome", "fenrir", "gacrux", "iapetus",
-    "kore", "laomedeia", "leda", "orus", "puck",
-    "pulcherrima", "rasalgethi", "sadachbia", "sadaltager",
-    "schedar", "sulafat", "umbriel", "vindemiatrix",
-    "zephyr", "zubenelgenubi",
-]
-
-TTS_MODELS = [
-    {
-        "id": "gemini-2.5-flash-preview-tts",
-        "name": "Gemini 2.5 Flash TTS",
-        "description": "Fast TTS model, good for quick generation"
-    },
-    {
-        "id": "gemini-2.5-pro-preview-tts",
-        "name": "Gemini 2.5 Pro TTS",
-        "description": "High quality TTS model, better for production"
-    }
-]
-
-TEXT_MODELS = [
-    {
-        "id": "gemini-3-pro-preview",
-        "name": "Gemini 3 Pro Preview",
-        "description": "Latest Gemini model for script generation"
-    }
-]
-
-
-# ------------------------------------------------------------------
-# S3 Cleanup Configuration
-# ------------------------------------------------------------------
-S3_CLEANUP_INTERVAL_MINUTES = 30  # Run cleanup every 15 minutes
-S3_OBJECT_TTL_HOURS = 1           # Delete podcast files older than 1 hour
-
-
-# ------------------------------------------------------------------
-# Lifespan & App Setup
-# ------------------------------------------------------------------
-
-async def _periodic_s3_cleanup():
-    """
-    Background coroutine that periodically deletes S3 podcast objects
-    older than S3_OBJECT_TTL_HOURS. Runs every S3_CLEANUP_INTERVAL_MINUTES.
-    """
-    while True:
-        await asyncio.sleep(S3_CLEANUP_INTERVAL_MINUTES * 60)
-        try:
-            deleted = await asyncio.to_thread(
-                s3_cleanup_old, S3_OBJECT_TTL_HOURS
-            )
-            if deleted:
-                print(f"🧹 S3 cleanup: deleted {deleted} podcast file(s) older than {S3_OBJECT_TTL_HOURS}h")
-        except Exception as e:
-            print(f"⚠️  S3 cleanup error: {e}")
+AVAILABLE_VOICES = list(VOICE_DESCRIPTIONS.keys())
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    print("🚀 Podcast API starting up...")
-    # Launch periodic S3 cleanup task
-    cleanup_task = asyncio.create_task(_periodic_s3_cleanup())
-    print(f"🧹 S3 cleanup scheduled: every {S3_CLEANUP_INTERVAL_MINUTES}min, TTL {S3_OBJECT_TTL_HOURS}h")
+    init_db()
+    refresh_models(force=True)
+    text_n = len(get_text_models())
+    tts_n = len(get_tts_models())
+    print(f"Podcast API started — database initialized, {text_n} text + {tts_n} TTS models cached")
     yield
-    # Shutdown – cancel the background cleanup task
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        pass
-    print("🛑 Podcast API shutting down...")
+    print("Podcast API shutting down")
 
 
 app = FastAPI(
     title="Rankify Podcast API",
-    description="API for generating multi-speaker podcast audio from text (S3-backed storage)",
-    version="1.0.0",
-    lifespan=lifespan
+    description="Project-based podcast generation with S3-backed audio storage",
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
-# CORS Configuration for React development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",  # React default
-        "http://localhost:5173",  # Vite default
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "*"  # Allow all for MVP - restrict in production
-    ],
-    allow_credentials=False,  # Must be False when allow_origins includes "*"
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=[
-        "X-Podcast-Title",
-        "X-Job-Id",
-        "Content-Disposition",
-    ],
 )
 
 
-# ------------------------------------------------------------------
-# Authentication Dependency
-# ------------------------------------------------------------------
-
 async def verify_api_key(x_api_key: str = Header(..., alias="x-api-key")):
-    """
-    Simple API key verification for MVP.
-    Replace with JWT or proper auth in production.
-    """
     if x_api_key != API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API key"
-        )
+        raise HTTPException(status_code=401, detail="Invalid API key")
     return x_api_key
 
 
-# ------------------------------------------------------------------
-# Pydantic Models for API
-# ------------------------------------------------------------------
-
-class VoiceInfo(BaseModel):
-    id: str = Field(description="Voice identifier")
-    name: str = Field(description="Display name (capitalized)")
-    description: str = Field(description="Voice characteristics")
-    sample_url: str = Field(description="URL to voice sample audio")
-    sample_available: bool = Field(description="Whether sample file exists")
+def get_project_or_404(db: Session, project_id: UUID) -> Project:
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
 
 
-class VoicesResponse(BaseModel):
-    voices: List[VoiceInfo]
-    total: int
-
-
-class TTSModelInfo(BaseModel):
-    id: str
-    name: str
-    description: str
-
-
-class ModelsResponse(BaseModel):
-    tts_models: List[TTSModelInfo]
-    text_models: List[TTSModelInfo]
-
-
-class GeneratePodcastRequest(BaseModel):
-    input_text: str = Field(
-        ...,
-        description="The text content to convert into a podcast",
-        min_length=10
+def get_podcast_or_404(db: Session, project_id: UUID, podcast_id: UUID) -> Podcast:
+    podcast = (
+        db.query(Podcast)
+        .filter(Podcast.id == podcast_id, Podcast.project_id == project_id)
+        .first()
     )
-    speaker_voices: List[str] = Field(
-        ...,
-        description="List of voice IDs for each speaker",
-        min_length=1,
-        max_length=6
+    if not podcast:
+        raise HTTPException(status_code=404, detail="Podcast not found")
+    return podcast
+
+
+def get_script_or_404(db: Session, project_id: UUID, script_id: UUID) -> PodcastScriptRecord:
+    record = (
+        db.query(PodcastScriptRecord)
+        .filter(PodcastScriptRecord.id == script_id, PodcastScriptRecord.project_id == project_id)
+        .first()
     )
-    num_speakers: int = Field(
-        default=2,
-        ge=1,
-        le=6,
-        description="Number of speakers in the podcast"
-    )
-    tts_model: str = Field(
-        default="gemini-2.5-flash-preview-tts",
-        description="TTS model to use"
-    )
-    text_model: str = Field(
-        default="gemini-3-pro-preview",
-        description="Text generation model for script"
-    )
-    temperature: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description="Creativity/temperature for script generation"
+    if not record:
+        raise HTTPException(status_code=404, detail="Script not found")
+    return record
+
+
+def podcast_to_summary(podcast: Podcast) -> PodcastSummary:
+    return PodcastSummary(
+        id=podcast.id,
+        title=podcast.title,
+        description=podcast.description,
+        status=podcast.status,
+        error_message=podcast.error_message,
+        audio_url=storage.audio_url(podcast.s3_key) if podcast.s3_key else None,
+        script_id=podcast.script_id,
+        created_at=podcast.created_at,
     )
 
 
-class GeneratePodcastResponse(BaseModel):
-    success: bool
-    message: str
-    script: Optional[PodcastScript] = None
-    audio_url: Optional[str] = None
-    job_id: Optional[str] = None
-
-
-class ScriptOnlyResponse(BaseModel):
-    success: bool
-    message: str
-    script: Optional[PodcastScript] = None
-
-
-class GenerateAudioFromScriptRequest(BaseModel):
-    """Request body for generating audio from an existing script."""
-    script: PodcastScript = Field(
-        ...,
-        description="The podcast script object (from /generate-script response)"
-    )
-    tts_model: str = Field(
-        default="gemini-2.5-flash-preview-tts",
-        description="TTS model to use"
+def podcast_to_response(podcast: Podcast) -> PodcastResponse:
+    audio_url = storage.audio_url(podcast.s3_key) if podcast.s3_key else None
+    return PodcastResponse(
+        id=podcast.id,
+        project_id=podcast.project_id,
+        title=podcast.title,
+        description=podcast.description,
+        status=podcast.status,
+        error_message=podcast.error_message,
+        s3_key=podcast.s3_key,
+        audio_url=audio_url,
+        script_id=podcast.script_id,
+        tts_model=podcast.tts_model,
+        tts_metadata=podcast.tts_metadata,
+        podcast_script_snapshot=podcast.podcast_script_snapshot,
+        created_at=podcast.created_at,
+        updated_at=podcast.updated_at,
     )
 
 
-# ------------------------------------------------------------------
-# Helper Functions
-# ------------------------------------------------------------------
+def script_to_response(record: PodcastScriptRecord) -> ScriptCreateResponse:
+    script_obj = None
+    if record.script:
+        script_obj = PodcastScript.model_validate(record.script)
+    return ScriptCreateResponse(
+        id=record.id,
+        project_id=record.project_id,
+        title=record.title,
+        description=record.description,
+        status=record.status,
+        error_message=record.error_message,
+        script=script_obj,
+        text_model=record.text_model,
+        tts_model=record.tts_model,
+        source_filename=record.source_filename,
+        auto_generate_podcast=record.auto_generate_podcast,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
-def get_voice_sample_url(voice_id: str) -> str:
-    """Generate URL for voice sample (relative path for API serving)."""
-    return f"/voices/sample/{voice_id}"
+
+def compute_project_counts(db: Session, project_id: UUID) -> ProjectCounts:
+    finished_podcasts = (
+        db.query(func.count(Podcast.id))
+        .filter(Podcast.project_id == project_id, Podcast.status == "ready")
+        .scalar()
+        or 0
+    )
+    unfinished_scripts = (
+        db.query(func.count(PodcastScriptRecord.id))
+        .filter(
+            PodcastScriptRecord.project_id == project_id,
+            PodcastScriptRecord.status.in_(("generating", "ready", "failed")),
+        )
+        .scalar()
+        or 0
+    )
+    unfinished_podcasts = (
+        db.query(func.count(Podcast.id))
+        .filter(
+            Podcast.project_id == project_id,
+            Podcast.status.in_(("generating", "failed")),
+        )
+        .scalar()
+        or 0
+    )
+    unfinished = unfinished_scripts + unfinished_podcasts
+    return ProjectCounts(
+        finished_podcasts=finished_podcasts,
+        unfinished=unfinished,
+        total_items=unfinished + finished_podcasts,
+    )
 
 
-def check_voice_sample_exists(voice_id: str) -> bool:
-    """Check if voice sample file exists."""
-    # Handle case sensitivity - check both lowercase and capitalized
-    sample_path = os.path.join(VOICE_SAMPLE_DIR, f"{voice_id}.wav")
-    sample_path_cap = os.path.join(VOICE_SAMPLE_DIR, f"{voice_id.capitalize()}.wav")
-    return os.path.exists(sample_path) or os.path.exists(sample_path_cap)
+def _script_phase(status: str) -> str:
+    if status == "generating":
+        return "writing_script"
+    if status == "ready":
+        return "script_ready"
+    return "failed"
 
 
-def get_voice_sample_path(voice_id: str) -> Optional[str]:
-    """Get actual path to voice sample file."""
-    sample_path = os.path.join(VOICE_SAMPLE_DIR, f"{voice_id}.wav")
-    sample_path_cap = os.path.join(VOICE_SAMPLE_DIR, f"{voice_id.capitalize()}.wav")
-    
-    if os.path.exists(sample_path):
-        return sample_path
-    elif os.path.exists(sample_path_cap):
-        return sample_path_cap
+def _podcast_phase(status: str) -> str:
+    if status == "generating":
+        return "generating_audio"
+    if status == "ready":
+        return "ready"
+    return "failed"
+
+
+def _parse_stored_script(raw: dict | None) -> PodcastScript | None:
+    if not raw:
+        return None
+    return PodcastScript.model_validate(raw)
+
+
+def build_project_items(db: Session, project_id: UUID) -> List[ProjectItem]:
+    items: List[ProjectItem] = []
+
+    scripts = (
+        db.query(PodcastScriptRecord)
+        .filter(
+            PodcastScriptRecord.project_id == project_id,
+            PodcastScriptRecord.status != "published",
+        )
+        .all()
+    )
+    for record in scripts:
+        items.append(
+            ProjectItem(
+                id=record.id,
+                kind="script",
+                phase=_script_phase(record.status),
+                title=record.title,
+                description=record.description,
+                error_message=record.error_message,
+                audio_url=None,
+                script=_parse_stored_script(record.script),
+                tts_model=record.tts_model,
+                text_model=record.text_model,
+                script_id=record.id,
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+        )
+
+    podcasts = (
+        db.query(Podcast)
+        .filter(Podcast.project_id == project_id)
+        .all()
+    )
+    for podcast in podcasts:
+        phase = _podcast_phase(podcast.status)
+        items.append(
+            ProjectItem(
+                id=podcast.id,
+                kind="podcast",
+                phase=phase,
+                title=podcast.title,
+                description=podcast.description,
+                error_message=podcast.error_message,
+                audio_url=storage.audio_url(podcast.s3_key) if podcast.s3_key else None,
+                script=_parse_stored_script(podcast.podcast_script_snapshot),
+                tts_model=podcast.tts_model,
+                script_id=podcast.script_id,
+                created_at=podcast.created_at,
+                updated_at=podcast.updated_at,
+            )
+        )
+
+    items.sort(key=lambda item: item.created_at, reverse=True)
+    return items
+
+
+def project_to_summary(db: Session, project: Project) -> ProjectSummary:
+    counts = compute_project_counts(db, project.id)
+    return ProjectSummary(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        counts=counts,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
+
+
+def project_detail_to_response(db: Session, project: Project) -> ProjectDetailResponse:
+    items = build_project_items(db, project.id)
+    counts = compute_project_counts(db, project.id)
+    counts.total_items = len(items)
+    return ProjectDetailResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        status=project.status,
+        counts=counts,
+        items=items,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+    )
+
+
+def get_voice_sample_path(voice_id: str) -> Optional[Path]:
+    for name in (f"{voice_id}.wav", f"{voice_id.capitalize()}.wav"):
+        path = VOICE_SAMPLE_DIR / name
+        if path.exists():
+            return path
     return None
 
 
-async def generate_script_async(
-    input_text: str,
-    speaker_voices: List[str],
-    num_speakers: int,
-    model: str,
-    temperature: float,
-) -> Optional[PodcastScript]:
-    """Generate podcast script using Gemini."""
-    return await run_gemini_agent(
-        instruction=podcast_system_instruction(num_speakers, speaker_voices),
-        user_input=input_text,
-        output_type=PodcastScript,
-        model=model,
-        temperature=temperature,
-        retries=2,
-    )
-
-
-def upload_to_s3_and_cleanup(local_path: str, filename: str) -> str:
+def parse_speaker_voices(raw: str) -> List[str]:
     """
-    Upload the generated podcast audio to S3 and delete the local temp file.
-    Returns the S3 presigned URL for the uploaded file.
+    Accept speaker voices from Swagger/curl in several formats:
+      - JSON array: ["achernar","enceladus"]
+      - Comma-separated: achernar,enceladus
+      - Single voice: achernar
     """
-    try:
-        # Upload to S3
-        s3_upload_file(local_path, filename)
-        # Generate presigned URL (1 hour expiry)
-        presigned_url = s3_presigned_url(filename)
-        return presigned_url
-    finally:
-        # Always clean up the local temp file
-        cleanup_temp_file(local_path)
+    text = raw.strip()
+    if not text:
+        return []
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except json.JSONDecodeError:
+            pass
+
+    return [
+        part.strip().strip('"').strip("'")
+        for part in text.split(",")
+        if part.strip()
+    ]
 
 
-def cleanup_temp_file(filepath: str):
-    """Clean up temporary local files after S3 upload."""
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-    except Exception as e:
-        print(f"Error cleaning up {filepath}: {e}")
+# ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
 
-
-# ------------------------------------------------------------------
-# Endpoints
-# ------------------------------------------------------------------
 
 @app.get("/", tags=["Health"])
 async def root():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "Rankify Podcast API",
-        "version": "1.0.0",
-        "storage": "S3"
-    }
+    return {"status": "healthy", "service": "Rankify Podcast API", "version": "2.0.0"}
 
 
 @app.get("/health", tags=["Health"])
-async def health_check():
-    """Detailed health check."""
+async def health_check(db: Session = Depends(get_db)):
+    db_ok = True
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        db_ok = False
     return {
-        "status": "healthy",
-        "voice_samples_dir": os.path.exists(VOICE_SAMPLE_DIR),
+        "status": "healthy" if db_ok else "degraded",
+        "database": db_ok,
         "available_voices": len(AVAILABLE_VOICES),
-        "tts_models": len(TTS_MODELS),
-        "storage": "S3"
+        "text_models": len(get_text_models()),
+        "tts_models": len(get_tts_models()),
     }
 
 
-@app.get(
-    "/voices",
-    response_model=VoicesResponse,
-    tags=["Voices"],
-    summary="Get available voices"
-)
-async def get_voices(api_key: str = Depends(verify_api_key)):
-    """
-    Get list of all available voices with their descriptions and sample URLs.
-    """
-    voices = []
-    
-    for voice_id in AVAILABLE_VOICES:
-        description = VOICE_DESCRIPTIONS.get(
-            voice_id.lower(), 
-            "Voice sample"
-        )
-        
-        voices.append(VoiceInfo(
-            id=voice_id,
-            name=voice_id.capitalize(),
-            description=description,
-            sample_url=get_voice_sample_url(voice_id),
-            sample_available=check_voice_sample_exists(voice_id)
-        ))
-    
-    return VoicesResponse(
-        voices=voices,
-        total=len(voices)
-    )
+# ---------------------------------------------------------------------------
+# Projects
+# ---------------------------------------------------------------------------
 
 
-@app.get(
-    "/voices/sample/{voice_id}",
-    tags=["Voices"],
-    summary="Get voice sample audio"
-)
-async def get_voice_sample(voice_id: str):
-    """
-    Stream voice sample audio file for a given voice ID.
-    No authentication required for voice samples (public resource).
-    """
-    sample_path = get_voice_sample_path(voice_id)
-    
-    if not sample_path:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Voice sample not found for: {voice_id}"
-        )
-    
-    return FileResponse(
-        sample_path,
-        media_type="audio/wav",
-        filename=f"{voice_id}.wav"
-    )
-
-
-@app.get(
-    "/tts-models",
-    response_model=ModelsResponse,
-    tags=["Models"],
-    summary="Get available models"
-)
-async def get_models(api_key: str = Depends(verify_api_key)):
-    """
-    Get list of available TTS and text generation models.
-    """
-    return ModelsResponse(
-        tts_models=[TTSModelInfo(**m) for m in TTS_MODELS],
-        text_models=[TTSModelInfo(**m) for m in TEXT_MODELS]
-    )
-
-
-@app.post(
-    "/generate-script",
-    response_model=ScriptOnlyResponse,
-    tags=["Generation"],
-    summary="Generate podcast script only"
-)
-async def generate_script_only(
-    request: GeneratePodcastRequest,
-    api_key: str = Depends(verify_api_key)
+@app.get("/projects", response_model=ProjectListResponse, tags=["Projects"])
+async def list_projects(
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
 ):
-    """
-    Generate just the podcast script without audio.
-    Useful for previewing/editing before TTS generation.
-    """
-    # Validate voices
-    invalid_voices = [v for v in request.speaker_voices if v.lower() not in [av.lower() for av in AVAILABLE_VOICES]]
-    if invalid_voices:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid voice IDs: {invalid_voices}"
-        )
-    
-    # Ensure num_speakers matches speaker_voices length
-    if len(request.speaker_voices) != request.num_speakers:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Number of speakers ({request.num_speakers}) must match speaker_voices length ({len(request.speaker_voices)})"
-        )
-    
-    try:
-        script = await generate_script_async(
-            input_text=request.input_text,
-            speaker_voices=request.speaker_voices,
-            num_speakers=request.num_speakers,
-            model=request.text_model,
-            temperature=request.temperature,
-        )
-        
-        if script is None:
-            return ScriptOnlyResponse(
-                success=False,
-                message="Script generation failed. Please try again.",
-                script=None
-            )
-        
-        return ScriptOnlyResponse(
-            success=True,
-            message="Script generated successfully",
-            script=script
-        )
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Script generation error: {str(e)}"
-        )
+    projects = db.query(Project).order_by(Project.updated_at.desc()).all()
+    summaries = [project_to_summary(db, p) for p in projects]
+    totals = ProjectCounts(
+        finished_podcasts=sum(s.counts.finished_podcasts for s in summaries),
+        unfinished=sum(s.counts.unfinished for s in summaries),
+        total_items=sum(s.counts.total_items for s in summaries),
+    )
+    return ProjectListResponse(
+        projects=summaries,
+        total=len(projects),
+        totals=totals,
+    )
+
+
+@app.post("/projects", response_model=ProjectResponse, status_code=201, tags=["Projects"])
+async def create_project(
+    body: ProjectCreate,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    project = Project(name=body.name, description=body.description or None)
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project_to_summary(db, project)
+
+
+@app.get("/projects/{project_id}", response_model=ProjectDetailResponse, tags=["Projects"])
+async def get_project(
+    project_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    project = get_project_or_404(db, project_id)
+    return project_detail_to_response(db, project)
+
+
+@app.patch("/projects/{project_id}", response_model=ProjectResponse, tags=["Projects"])
+async def update_project(
+    project_id: UUID,
+    body: ProjectUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    project = get_project_or_404(db, project_id)
+    if body.name is not None:
+        project.name = body.name
+    if body.description is not None:
+        project.description = body.description or None
+    if body.status is not None:
+        project.status = body.status
+    project.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(project)
+    return project_to_summary(db, project)
+
+
+@app.delete("/projects/{project_id}", status_code=204, tags=["Projects"])
+async def delete_project(
+    project_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    project = get_project_or_404(db, project_id)
+    storage.delete_project_podcasts(str(project_id))
+    db.delete(project)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
 
 
 @app.post(
-    "/generate-podcast",
+    "/projects/{project_id}/generate-podcast-script",
+    response_model=GeneratePodcastScriptResponse,
     tags=["Generation"],
-    summary="Generate full podcast with audio"
+)
+async def generate_podcast_script(
+    project_id: UUID,
+    file: UploadFile = File(...),
+    speaker_voices: str = Form(
+        ...,
+        description='Voice IDs as JSON array or comma-separated, e.g. ["achernar","enceladus"]',
+        examples=["achernar,enceladus"],
+    ),
+    num_speakers: int = Form(2),
+    text_model: Optional[str] = Form(
+        None,
+        description="Gemini text model (defaults to newest from GET /models/text)",
+    ),
+    temperature: float = Form(0.7),
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    get_project_or_404(db, project_id)
+
+    voice_list = parse_speaker_voices(speaker_voices)
+    if not voice_list:
+        raise HTTPException(
+            status_code=400,
+            detail='speaker_voices is required. Use ["achernar","enceladus"] or achernar,enceladus',
+        )
+
+    invalid = [v for v in voice_list if v.lower() not in AVAILABLE_VOICES]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid voice IDs: {invalid}")
+
+    if len(voice_list) != num_speakers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"num_speakers ({num_speakers}) must match speaker_voices length ({len(voice_list)})",
+        )
+
+    try:
+        input_text = extract_text(file.filename or "upload.txt", file.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if len(input_text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Document text too short (min 10 chars)")
+
+    resolved_text_model = text_model or get_default_text_model()
+    try:
+        validate_text_model(resolved_text_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    script = await run_gemini_agent(
+        instruction=podcast_system_instruction(num_speakers, voice_list),
+        user_input=input_text,
+        output_type=PodcastScript,
+        model=resolved_text_model,
+        temperature=temperature,
+    )
+
+    if script is None:
+        return GeneratePodcastScriptResponse(
+            success=False,
+            message="Podcast script generation failed",
+            podcast_script=None,
+        )
+
+    return GeneratePodcastScriptResponse(
+        success=True,
+        message="Podcast script generated successfully",
+        podcast_script=script,
+    )
+
+
+@app.post(
+    "/projects/{project_id}/generate-podcast",
+    response_model=GeneratePodcastResponse,
+    tags=["Generation"],
 )
 async def generate_podcast(
-    request: GeneratePodcastRequest,
-    background_tasks: BackgroundTasks,
-    api_key: str = Depends(verify_api_key)
+    project_id: UUID,
+    body: GeneratePodcastRequest,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
 ):
-    """
-    Generate complete podcast: script + TTS audio.
-    
-    Audio is generated locally, uploaded to S3, and a presigned URL
-    is returned. The local temp file is cleaned up after upload.
-    """
-    # Validate voices
-    invalid_voices = [v for v in request.speaker_voices if v.lower() not in [av.lower() for av in AVAILABLE_VOICES]]
-    if invalid_voices:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid voice IDs: {invalid_voices}"
-        )
-    
-    # Ensure num_speakers matches speaker_voices length
-    if len(request.speaker_voices) != request.num_speakers:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Number of speakers ({request.num_speakers}) must match speaker_voices length ({len(request.speaker_voices)})"
-        )
-    
-    # Validate TTS model
-    valid_tts_models = [m["id"] for m in TTS_MODELS]
-    if request.tts_model not in valid_tts_models:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TTS model. Choose from: {valid_tts_models}"
-        )
-    
+    get_project_or_404(db, project_id)
+
     try:
-        # Step 1: Generate Script
-        script = await generate_script_async(
-            input_text=request.input_text,
-            speaker_voices=request.speaker_voices,
-            num_speakers=request.num_speakers,
-            model=request.text_model,
-            temperature=request.temperature,
-        )
-        
-        if script is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Script generation failed. Please try again."
-            )
-        
-        # Step 2: Build speaker-voice mapping
-        speaker_voice_map = build_speaker_voice_mapping(script)
-        
-        # Step 3: Prepare dialogue text for TTS
-        dialogue_text = "\n".join(
-            f"{turn.speaker}: {turn.text}"
-            for turn in script.dialogue
-        )
-        
-        final_prompt = (
-            f"TTS the following conversation between "
-            f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
-        )
-        
-        # Step 4: Generate TTS audio locally (temp file)
-        job_id = str(uuid.uuid4())
-        audio_filename = f"podcast_{job_id}.wav"
-        output_file = os.path.join(OUTPUT_DIR, audio_filename)
-        
-        tts = MultiSpeakerTTS()
-        tts_result = tts.generate_tts(
-            dialogue=final_prompt,
-            speaker_voice_map=speaker_voice_map,
-            tts_model=request.tts_model,
-            output_file=output_file,
-        )
-        
-        if not os.path.exists(output_file):
-            raise HTTPException(
-                status_code=500,
-                detail="Audio generation failed - output file not created"
-            )
-        
-        # Step 5: Upload to S3 and get presigned URL
-        try:
-            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
-        except Exception as e:
-            # Clean up local file even on S3 upload failure
-            cleanup_temp_file(output_file)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to upload audio to S3: {str(e)}"
-            )
-        
-        # Step 6: Return JSON with S3 presigned URL
-        return {
-            "success": True,
-            "message": "Podcast generated successfully",
-            "job_id": job_id,
-            "script": script.model_dump(),
-            "audio_url": presigned_url,
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Podcast generation error: {str(e)}"
-        )
+        validate_tts_model(body.tts_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-
-@app.post(
-    "/generate-podcast-with-script",
-    tags=["Generation"],
-    summary="Generate podcast and return script + audio URL"
-)
-async def generate_podcast_with_metadata(
-    request: GeneratePodcastRequest,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Generate complete podcast and return both the script metadata and audio.
-    
-    Returns JSON with script details and a presigned S3 URL for the audio.
-    The presigned URL is valid for 1 hour.
-    """
-    # Validate voices
-    invalid_voices = [v for v in request.speaker_voices if v.lower() not in [av.lower() for av in AVAILABLE_VOICES]]
-    if invalid_voices:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid voice IDs: {invalid_voices}"
-        )
-    
-    if len(request.speaker_voices) != request.num_speakers:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Number of speakers ({request.num_speakers}) must match speaker_voices length ({len(request.speaker_voices)})"
-        )
-    
-    valid_tts_models = [m["id"] for m in TTS_MODELS]
-    if request.tts_model not in valid_tts_models:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TTS model. Choose from: {valid_tts_models}"
-        )
-    
-    try:
-        # Generate Script
-        script = await generate_script_async(
-            input_text=request.input_text,
-            speaker_voices=request.speaker_voices,
-            num_speakers=request.num_speakers,
-            model=request.text_model,
-            temperature=request.temperature,
-        )
-        
-        if script is None:
-            return {
-                "success": False,
-                "message": "Script generation failed",
-                "script": None,
-                "audio_url": None
-            }
-        
-        # Build speaker-voice mapping and generate TTS
-        speaker_voice_map = build_speaker_voice_mapping(script)
-        
-        dialogue_text = "\n".join(
-            f"{turn.speaker}: {turn.text}"
-            for turn in script.dialogue
-        )
-        
-        final_prompt = (
-            f"TTS the following conversation between "
-            f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
-        )
-        
-        job_id = str(uuid.uuid4())
-        audio_filename = f"podcast_{job_id}.wav"
-        output_file = os.path.join(OUTPUT_DIR, audio_filename)
-        
-        tts = MultiSpeakerTTS()
-        tts_result = tts.generate_tts(
-            dialogue=final_prompt,
-            speaker_voice_map=speaker_voice_map,
-            tts_model=request.tts_model,
-            output_file=output_file,
-        )
-        
-        if not os.path.exists(output_file):
-            raise HTTPException(
-                status_code=500,
-                detail="Audio generation failed - output file not created"
-            )
-        
-        # Upload to S3 and get presigned URL, clean up local file
-        try:
-            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
-        except Exception as e:
-            cleanup_temp_file(output_file)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to upload audio to S3: {str(e)}"
-            )
-        
-        return {
-            "success": True,
-            "message": "Podcast generated successfully",
-            "job_id": job_id,
-            "script": script.model_dump(),
-            "audio_url": presigned_url,
-            "tts_metadata": tts_result
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Podcast generation error: {str(e)}"
-        )
-
-
-@app.post(
-    "/generate-audio-from-script",
-    tags=["Generation"],
-    summary="Generate audio from existing script"
-)
-async def generate_audio_from_script(
-    request: GenerateAudioFromScriptRequest,
-    api_key: str = Depends(verify_api_key)
-):
-    """
-    Generate TTS audio from an existing podcast script.
-    
-    Use this endpoint when you have already generated a script via /generate-script
-    and want to convert it to audio (possibly after editing).
-    
-    The audio is uploaded to S3 and a presigned URL (valid 1 hour) is returned.
-    
-    Flow:
-    1. POST /generate-script → get script JSON
-    2. (Optional) Edit the script in your UI
-    3. POST /generate-audio-from-script with the script → get S3 audio URL
-    """
-    script = request.script
-    
-    # Validate TTS model
-    valid_tts_models = [m["id"] for m in TTS_MODELS]
-    if request.tts_model not in valid_tts_models:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TTS model. Choose from: {valid_tts_models}"
-        )
-    
-    # Validate that speakers have voice_ids
-    for speaker in script.speakers:
-        if not speaker.voice_id:
+    podcast_script = body.podcast_script
+    for speaker in podcast_script.speakers:
+        if speaker.voice_id.lower() not in AVAILABLE_VOICES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Speaker '{speaker.name}' is missing voice_id"
+                detail=f"Invalid voice_id '{speaker.voice_id}' for speaker '{speaker.name}'",
             )
-        if speaker.voice_id.lower() not in [v.lower() for v in AVAILABLE_VOICES]:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid voice_id '{speaker.voice_id}' for speaker '{speaker.name}'"
-            )
-    
+
+    speaker_voice_map = build_speaker_voice_mapping(podcast_script)
+    dialogue_text = "\n".join(
+        f"{turn.speaker}: {turn.text}" for turn in podcast_script.dialogue
+    )
+    final_prompt = (
+        f"TTS the following conversation between "
+        f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
+    )
+
+    podcast_id = uuid.uuid4()
+    temp_path = OUTPUT_DIR / f"temp_{podcast_id}.wav"
+
     try:
-        # Build speaker-voice mapping from the script
-        speaker_voice_map = build_speaker_voice_mapping(script)
-        
-        # Prepare dialogue text for TTS
-        dialogue_text = "\n".join(
-            f"{turn.speaker}: {turn.text}"
-            for turn in script.dialogue
-        )
-        
-        final_prompt = (
-            f"TTS the following conversation between "
-            f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
-        )
-        
-        # Generate TTS audio locally (temp file)
-        job_id = str(uuid.uuid4())
-        audio_filename = f"podcast_{job_id}.wav"
-        output_file = os.path.join(OUTPUT_DIR, audio_filename)
-        
         tts = MultiSpeakerTTS()
         tts_result = tts.generate_tts(
             dialogue=final_prompt,
             speaker_voice_map=speaker_voice_map,
-            tts_model=request.tts_model,
-            output_file=output_file,
+            tts_model=body.tts_model,
+            output_file=str(temp_path),
         )
-        
-        if not os.path.exists(output_file):
-            raise HTTPException(
-                status_code=500,
-                detail="Audio generation failed - output file not created"
-            )
-        
-        # Upload to S3 and get presigned URL, clean up local file
-        try:
-            presigned_url = upload_to_s3_and_cleanup(output_file, audio_filename)
-        except Exception as e:
-            cleanup_temp_file(output_file)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to upload audio to S3: {str(e)}"
-            )
-        
-        return {
-            "success": True,
-            "message": "Audio generated successfully from script",
-            "job_id": job_id,
-            "audio_url": presigned_url,
-            "script_title": script.title,
-            "tts_metadata": tts_result
-        }
-        
+
+        if not temp_path.exists():
+            raise HTTPException(status_code=500, detail="Audio generation failed")
+
+        s3_key = storage.upload_podcast(str(temp_path), str(project_id), str(podcast_id))
+
+        podcast = Podcast(
+            id=podcast_id,
+            project_id=project_id,
+            title=podcast_script.title,
+            description=podcast_script.description,
+            status="ready",
+            s3_key=s3_key,
+            tts_model=body.tts_model,
+            tts_metadata={
+                "input_tokens": tts_result.get("input_tokens"),
+                "output_tokens": tts_result.get("output_tokens"),
+                "total_tokens": tts_result.get("total_tokens"),
+            },
+            podcast_script_snapshot=podcast_script.model_dump(),
+        )
+        db.add(podcast)
+
+        project = get_project_or_404(db, project_id)
+        project.updated_at = datetime.now(timezone.utc)
+
+        db.commit()
+        db.refresh(podcast)
+
+        return GeneratePodcastResponse(
+            success=True,
+            message="Podcast generated and saved successfully",
+            podcast=podcast_to_summary(podcast),
+        )
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Audio generation error: {str(e)}"
-        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Podcast generation error: {exc}")
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Podcasts
+# ---------------------------------------------------------------------------
 
 
 @app.get(
-    "/audio/{job_id}",
-    tags=["Audio"],
-    summary="Get audio presigned URL by job ID"
+    "/projects/{project_id}/podcasts",
+    response_model=PodcastListResponse,
+    tags=["Podcasts"],
 )
-async def get_audio(job_id: str):
-    """
-    Get a presigned S3 URL for previously generated podcast audio by job ID.
-    
-    Redirects the client to the S3 presigned URL. If the audio file
-    does not exist in S3, a 404 error is returned.
-    """
-    audio_filename = f"podcast_{job_id}.wav"
-    
-    try:
-        # Verify the object exists in S3 before generating URL
-        from helpers.s3_helper import head_object as s3_head_object
-        s3_head_object(audio_filename)
-    except Exception:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Audio not found for job ID: {job_id}"
+async def list_podcasts(
+    project_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    get_project_or_404(db, project_id)
+    podcasts = (
+        db.query(Podcast)
+        .filter(Podcast.project_id == project_id)
+        .order_by(Podcast.created_at.desc())
+        .all()
+    )
+    summaries = [
+        PodcastSummary(
+            id=p.id,
+            title=p.title,
+            description=p.description,
+            status=p.status,
+            error_message=p.error_message,
+            audio_url=storage.audio_url(p.s3_key) if p.s3_key else None,
+            script_id=p.script_id,
+            created_at=p.created_at,
         )
-    
-    # Generate a fresh presigned URL and redirect
-    presigned_url = s3_presigned_url(audio_filename)
-    return RedirectResponse(url=presigned_url, status_code=307)
+        for p in podcasts
+    ]
+    return PodcastListResponse(podcasts=summaries, total=len(summaries))
 
 
-# ------------------------------------------------------------------
-# Run with Uvicorn (for development)
-# ------------------------------------------------------------------
+@app.get(
+    "/projects/{project_id}/podcasts/{podcast_id}",
+    response_model=PodcastResponse,
+    tags=["Podcasts"],
+)
+async def get_podcast(
+    project_id: UUID,
+    podcast_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    podcast = get_podcast_or_404(db, project_id, podcast_id)
+    return podcast_to_response(podcast)
+
+
+@app.delete("/projects/{project_id}/podcasts/{podcast_id}", status_code=204, tags=["Podcasts"])
+async def delete_podcast(
+    project_id: UUID,
+    podcast_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    podcast = get_podcast_or_404(db, project_id, podcast_id)
+    if podcast.s3_key:
+        try:
+            storage.delete_object(podcast.s3_key)
+        except Exception:
+            pass
+    db.delete(podcast)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Podcast scripts (DB-backed, async generation)
+# ---------------------------------------------------------------------------
+
+
+@app.get(
+    "/projects/{project_id}/scripts",
+    response_model=ScriptListResponse,
+    tags=["Scripts"],
+)
+async def list_scripts(
+    project_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    get_project_or_404(db, project_id)
+    scripts = (
+        db.query(PodcastScriptRecord)
+        .filter(PodcastScriptRecord.project_id == project_id)
+        .order_by(PodcastScriptRecord.created_at.desc())
+        .all()
+    )
+    return ScriptListResponse(
+        scripts=[script_to_response(s) for s in scripts],
+        total=len(scripts),
+    )
+
+
+@app.post(
+    "/projects/{project_id}/scripts",
+    response_model=ScriptCreateResponse,
+    status_code=201,
+    tags=["Scripts"],
+)
+async def create_script(
+    project_id: UUID,
+    file: UploadFile = File(...),
+    speaker_voices: str = Form(...),
+    num_speakers: int = Form(2),
+    text_model: Optional[str] = Form(None),
+    temperature: float = Form(0.7),
+    tts_model: str = Form("gemini-2.5-flash-preview-tts"),
+    episode_title: Optional[str] = Form(None),
+    auto_generate_podcast: bool = Form(False),
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    get_project_or_404(db, project_id)
+
+    voice_list = parse_speaker_voices(speaker_voices)
+    if not voice_list:
+        raise HTTPException(status_code=400, detail="speaker_voices is required")
+    invalid = [v for v in voice_list if v.lower() not in AVAILABLE_VOICES]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid voice IDs: {invalid}")
+    if len(voice_list) != num_speakers:
+        raise HTTPException(
+            status_code=400,
+            detail=f"num_speakers ({num_speakers}) must match speaker_voices length ({len(voice_list)})",
+        )
+
+    try:
+        input_text = extract_text(file.filename or "upload.txt", file.file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if episode_title and episode_title.strip():
+        input_text = f"Episode title: {episode_title.strip()}\n\n{input_text}"
+
+    if len(input_text.strip()) < 10:
+        raise HTTPException(status_code=400, detail="Document text too short (min 10 chars)")
+
+    resolved_text_model = text_model or get_default_text_model()
+    try:
+        validate_text_model(resolved_text_model)
+        validate_tts_model(tts_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    title = (episode_title or "").strip() or "New script"
+    record = PodcastScriptRecord(
+        project_id=project_id,
+        title=title,
+        status="generating",
+        text_model=resolved_text_model,
+        tts_model=tts_model,
+        generation_config={
+            "temperature": temperature,
+            "num_speakers": num_speakers,
+            "speaker_voices": voice_list,
+        },
+        source_filename=file.filename,
+        auto_generate_podcast=auto_generate_podcast,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+
+    schedule_script_generation(
+        record.id,
+        input_text,
+        num_speakers,
+        voice_list,
+        resolved_text_model,
+        temperature,
+    )
+
+    return script_to_response(record)
+
+
+@app.get(
+    "/projects/{project_id}/scripts/{script_id}",
+    response_model=ScriptCreateResponse,
+    tags=["Scripts"],
+)
+async def get_script(
+    project_id: UUID,
+    script_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    record = get_script_or_404(db, project_id, script_id)
+    return script_to_response(record)
+
+
+@app.patch(
+    "/projects/{project_id}/scripts/{script_id}",
+    response_model=ScriptCreateResponse,
+    tags=["Scripts"],
+)
+async def update_script(
+    project_id: UUID,
+    script_id: UUID,
+    body: ScriptUpdate,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    record = get_script_or_404(db, project_id, script_id)
+    if record.status == "generating":
+        raise HTTPException(status_code=409, detail="Script is still generating")
+    if record.status == "published":
+        raise HTTPException(status_code=409, detail="Script already used for podcast generation")
+
+    if body.title is not None:
+        record.title = body.title
+    if body.description is not None:
+        record.description = body.description
+    if body.tts_model is not None:
+        try:
+            validate_tts_model(body.tts_model)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        record.tts_model = body.tts_model
+    if body.script is not None:
+        for speaker in body.script.speakers:
+            if speaker.voice_id.lower() not in AVAILABLE_VOICES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid voice_id '{speaker.voice_id}'",
+                )
+        record.script = body.script.model_dump()
+        record.title = body.script.title
+        record.description = body.script.description
+        if record.status == "failed":
+            record.status = "ready"
+            record.error_message = None
+
+    record.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+    return script_to_response(record)
+
+
+@app.delete("/projects/{project_id}/scripts/{script_id}", status_code=204, tags=["Scripts"])
+async def delete_script(
+    project_id: UUID,
+    script_id: UUID,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    record = get_script_or_404(db, project_id, script_id)
+    db.delete(record)
+    db.commit()
+
+
+@app.post(
+    "/projects/{project_id}/scripts/{script_id}/generate-podcast",
+    response_model=GeneratePodcastResponse,
+    tags=["Scripts"],
+)
+async def generate_podcast_from_script(
+    project_id: UUID,
+    script_id: UUID,
+    body: GeneratePodcastFromScriptRequest,
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    record = get_script_or_404(db, project_id, script_id)
+    if record.status == "generating":
+        raise HTTPException(status_code=409, detail="Script is still generating")
+    if record.status == "published":
+        raise HTTPException(status_code=409, detail="Script already used for podcast generation")
+
+    tts_model = body.tts_model or record.tts_model
+    try:
+        validate_tts_model(tts_model)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if body.script is not None:
+        for speaker in body.script.speakers:
+            if speaker.voice_id.lower() not in AVAILABLE_VOICES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid voice_id '{speaker.voice_id}'",
+                )
+        record.script = body.script.model_dump()
+        record.title = body.script.title
+        record.description = body.script.description
+        record.tts_model = tts_model
+        record.updated_at = datetime.now(timezone.utc)
+        if record.status == "failed":
+            record.status = "ready"
+            record.error_message = None
+        db.flush()
+    elif body.tts_model is not None:
+        record.tts_model = tts_model
+        record.updated_at = datetime.now(timezone.utc)
+        db.flush()
+
+    if record.status not in ("ready",) or not record.script:
+        raise HTTPException(status_code=409, detail="Script is not ready for audio generation")
+
+    podcast_script = PodcastScript.model_validate(record.script)
+    podcast_id = uuid.uuid4()
+    podcast = Podcast(
+        id=podcast_id,
+        project_id=project_id,
+        script_id=script_id,
+        title=podcast_script.title,
+        description=podcast_script.description,
+        status="generating",
+        s3_key=None,
+        tts_model=tts_model,
+        podcast_script_snapshot=record.script,
+    )
+    db.add(podcast)
+    record.status = "published"
+    record.updated_at = datetime.now(timezone.utc)
+    project = get_project_or_404(db, project_id)
+    project.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(podcast)
+
+    schedule_podcast_generation(project_id, script_id, tts_model, podcast_id)
+
+    return GeneratePodcastResponse(
+        success=True,
+        message="Podcast generation started",
+        podcast=podcast_to_summary(podcast),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Utility — voices & models
+# ---------------------------------------------------------------------------
+
+
+def voice_row_to_info(voice: Voice) -> VoiceInfo:
+    url: Optional[str] = None
+    if voice.sample_available and voice.s3_key:
+        url = storage.audio_url(voice.s3_key)
+    elif get_voice_sample_path(voice.id):
+        url = f"/voices/sample/{voice.id}"
+
+    available = bool(
+        (voice.sample_available and voice.s3_key) or get_voice_sample_path(voice.id)
+    )
+    return VoiceInfo(
+        id=voice.id,
+        name=voice.name,
+        description=voice.description,
+        s3_key=voice.s3_key if voice.sample_available else None,
+        audio_url=url,
+        sample_url=url,
+        sample_available=available,
+    )
+
+
+@app.get("/voices", response_model=VoicesResponse, tags=["Voices"])
+async def get_voices(
+    db: Session = Depends(get_db),
+    _: str = Depends(verify_api_key),
+):
+    voices = db.query(Voice).order_by(Voice.id).all()
+    return VoicesResponse(
+        voices=[voice_row_to_info(v) for v in voices],
+        total=len(voices),
+    )
+
+
+@app.get("/voices/sample/{voice_id}", tags=["Voices"])
+async def get_voice_sample(voice_id: str, db: Session = Depends(get_db)):
+    vid = voice_id.lower()
+    voice = db.get(Voice, vid)
+    if voice is None and vid not in AVAILABLE_VOICES:
+        raise HTTPException(status_code=404, detail=f"Unknown voice: {voice_id}")
+
+    if voice and voice.sample_available and voice.s3_key:
+        return RedirectResponse(storage.audio_url(voice.s3_key), status_code=302)
+
+    sample_path = get_voice_sample_path(vid)
+    if not sample_path:
+        raise HTTPException(status_code=404, detail=f"Voice sample not found for: {voice_id}")
+    return FileResponse(sample_path, media_type="audio/wav", filename=f"{vid}.wav")
+
+
+# ---------------------------------------------------------------------------
+# Models (Gemini text + TTS — live from API, latest 10 each)
+# ---------------------------------------------------------------------------
+
+
+def _cached_at() -> datetime | None:
+    ts = get_cache_fetched_at()
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def _build_models_response() -> ModelsResponse:
+    text = get_text_models()
+    tts = get_tts_models()
+    return ModelsResponse(
+        text_models=[ModelInfo(**m) for m in text],
+        tts_models=[ModelInfo(**m) for m in tts],
+        text_total=len(text),
+        tts_total=len(tts),
+        limit=MODELS_LIMIT,
+        cached_at=_cached_at(),
+    )
+
+
+@app.get("/models", response_model=ModelsResponse, tags=["Models"])
+async def list_all_models(_: str = Depends(verify_api_key)):
+    """Latest text + TTS models available for this Gemini API key."""
+    refresh_models()
+    return _build_models_response()
+
+
+@app.get("/models/text", response_model=TextModelsResponse, tags=["Models"])
+async def list_text_models(_: str = Depends(verify_api_key)):
+    """Latest text models for podcast script generation."""
+    refresh_models()
+    models = get_text_models()
+    return TextModelsResponse(
+        models=[ModelInfo(**m) for m in models],
+        total=len(models),
+        limit=MODELS_LIMIT,
+        cached_at=_cached_at(),
+    )
+
+
+@app.get("/models/tts", response_model=TtsModelsResponse, tags=["Models"])
+async def list_tts_models(_: str = Depends(verify_api_key)):
+    """Latest TTS models for podcast audio generation."""
+    refresh_models()
+    models = get_tts_models()
+    return TtsModelsResponse(
+        models=[ModelInfo(**m) for m in models],
+        total=len(models),
+        limit=MODELS_LIMIT,
+        cached_at=_cached_at(),
+    )
+
+
+@app.post("/models/refresh", response_model=ModelsResponse, tags=["Models"])
+async def refresh_models_endpoint(_: str = Depends(verify_api_key)):
+    """Force refresh model list from Gemini API (bypasses cache)."""
+    refresh_models(force=True)
+    return _build_models_response()
+
+
+@app.get("/tts-models", response_model=ModelsResponse, tags=["Models"], deprecated=True)
+async def get_models_legacy(_: str = Depends(verify_api_key)):
+    """Legacy alias — use GET /models instead."""
+    refresh_models()
+    return _build_models_response()
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

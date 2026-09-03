@@ -1,49 +1,654 @@
-# Rankify Podcast API Documentation
+# Rankify Podcast API — Documentation
 
-## Base URL
-```
-Development: http://localhost:8000
-```
+**Version:** 2.0.0  
+**Base URL (local):** `http://127.0.0.1:8001`  
+**Interactive docs:** [Swagger UI](http://127.0.0.1:8001/docs) · [OpenAPI JSON](http://127.0.0.1:8001/openapi.json)
+
+---
+
+## Table of contents
+
+1. [Overview](#overview)
+2. [Authentication](#authentication)
+3. [Environment variables](#environment-variables)
+4. [Quick start](#quick-start)
+5. [Architecture](#architecture)
+6. [Database schema](#database-schema)
+7. [S3 storage layout](#s3-storage-layout)
+8. [End-to-end workflow](#end-to-end-workflow)
+9. [Data models](#data-models)
+10. [API reference](#api-reference)
+    - [Health](#health)
+    - [Projects](#projects)
+    - [Generation](#generation)
+    - [Podcasts](#podcasts)
+    - [Voices](#voices)
+    - [Models](#models)
+11. [Voice catalog](#voice-catalog)
+12. [Error responses](#error-responses)
+13. [cURL examples](#curl-examples)
+
+---
+
+## Overview
+
+Rankify Podcast API turns uploaded documents into multi-speaker podcast audio.
+
+| Layer | Technology |
+|-------|------------|
+| API | FastAPI 2.0 |
+| Script generation | Google Gemini (text models) |
+| Audio synthesis | Google Gemini TTS |
+| Persistence | PostgreSQL (`projects`, `podcasts`, `voices`) |
+| File storage | AWS S3 (podcast audio + voice samples) |
+
+**Design principles**
+
+- **Projects** and **podcasts** are persisted in PostgreSQL with S3 audio links.
+- **Documents** and **podcast scripts** are ephemeral — passed in requests and returned in responses; they are not stored as separate DB entities.
+- **Voices** are a static catalog of 30 Gemini TTS voice IDs, with metadata in PostgreSQL and sample audio on S3.
+- **Gemini models** (text + TTS) are fetched live from the Gemini API and cached for 1 hour.
+
+---
 
 ## Authentication
-All protected endpoints require `x-api-key` header:
-```
-x-api-key: dev-api-key-12345
+
+Most endpoints require an API key in the request header:
+
+```http
+x-api-key: your-api-key
 ```
 
-## Audio Storage
-All generated podcast audio files are stored in **AWS S3**.  
-Endpoints return **presigned S3 URLs** (valid for 1 hour) instead of local file paths.  
-The `/audio/{job_id}` endpoint redirects (307) to a fresh presigned S3 URL.
+| Endpoint group | Auth required |
+|----------------|---------------|
+| `GET /`, `GET /health` | No |
+| `GET /voices/sample/{voice_id}` | No |
+| All other endpoints | **Yes** |
+
+**401 Unauthorized** — missing or invalid `x-api-key`.
+
+Set the key in `.env`:
+
+```env
+X_API_KEY=AICERTS@123
+```
 
 ---
 
-## Endpoints Overview
+## Environment variables
 
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/` | No | Health check |
-| GET | `/health` | No | Detailed health status |
-| GET | `/voices` | Yes | List available voices with sample URLs |
-| GET | `/voices/sample/{voice_id}` | No | Get voice sample audio file |
-| GET | `/tts-models` | Yes | List available TTS and text models |
-| POST | `/generate-script` | Yes | Generate script only (no audio) |
-| POST | `/generate-audio-from-script` | Yes | Generate audio from existing script (S3) |
-| POST | `/generate-podcast` | Yes | Generate podcast, returns JSON with S3 audio URL |
-| POST | `/generate-podcast-with-script` | Yes | **Recommended** - Returns JSON with script + S3 audio URL |
-| GET | `/audio/{job_id}` | No | Redirects to S3 presigned URL for audio |
+Create `.env` at the **repository root** (`Rankify-Podcast/.env`):
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GEMINI_API_KEY` | Yes | — | Google Gemini API key |
+| `X_API_KEY` | Yes | `dev-api-key-12345` | API authentication key |
+| `DATABASE_URL` | Yes | `postgresql://rankify:rankify@localhost:5432/rankify_podcast` | PostgreSQL connection string |
+| `AWS_ACCESS_KEY_ID` | Yes* | — | AWS credentials for S3 |
+| `AWS_SECRET_ACCESS_KEY` | Yes* | — | AWS credentials for S3 |
+| `AWS_S3_BUCKET_NAME` | No | `rankify-image-generator` | S3 bucket name |
+| `AWS_REGION` | No | `us-east-1` | AWS region |
+| `PRESIGNED_URL_EXPIRY` | No | `3600` | Presigned URL lifetime (seconds) |
+| `S3_USE_PUBLIC_URLS` | No | `false` | If `true`, return clean public S3 URLs instead of presigned |
+| `VOICE_S3_PREFIX` | No | `voices` | S3 prefix for voice sample files |
+
+\* Required for podcast generation and voice sample URLs.
+
+**Local PostgreSQL (Docker):**
+
+```env
+DATABASE_URL=postgresql://rankify:rankify@localhost:5433/rankify_podcast
+```
 
 ---
 
-## 1. GET /voices - List Available Voices
+## Quick start
 
-### Request
-```bash
-curl -X GET "http://localhost:8000/voices" \
-  -H "x-api-key: dev-api-key-12345"
+```powershell
+# 1. Start PostgreSQL
+cd "C:\AI Certs\Rankify-Podcast\app"
+docker compose up -d postgres
+
+# 2. Activate virtual environment & install dependencies
+cd ..
+.\podcast_env\Scripts\Activate.ps1
+pip install -r app\requirements.txt
+
+# 3. Run API server
+cd app
+python -m uvicorn main:app --reload --port 8001
 ```
 
-### Response
+Open Swagger: **http://127.0.0.1:8001/docs**
+
+**Upload voice samples to S3 (one-time):**
+
+```powershell
+python experiment\s3_voice_samples_upload.py
+python experiment\s3_voice_samples_upload.py --sync-db   # mark DB available without re-upload
+```
+
+---
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Client    │────▶│  FastAPI     │────▶│ PostgreSQL  │
+│  (Frontend) │     │  main.py     │     │ projects    │
+└─────────────┘     └──────┬───────┘     │ podcasts    │
+                           │             │ voices      │
+                           ▼             └─────────────┘
+                    ┌──────────────┐
+                    │  AWS S3      │
+                    │  podcasts    │
+                    │  voice samples│
+                    └──────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │ Gemini API   │
+                    │ text + TTS   │
+                    └──────────────┘
+```
+
+### Generation pipeline (2 API calls)
+
+```
+Document upload  →  POST .../generate-podcast-script  →  PodcastScript JSON
+PodcastScript    →  POST .../generate-podcast           →  Saved podcast + audio_url
+```
+
+---
+
+## Database schema
+
+### `projects`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Auto-generated |
+| `name` | VARCHAR(255) | Project display name |
+| `status` | VARCHAR(20) | `active` or `archived` |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+### `podcasts`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Auto-generated on generation |
+| `project_id` | UUID (FK) | Parent project |
+| `title` | VARCHAR(255) | From podcast script |
+| `description` | TEXT | From podcast script |
+| `s3_key` | VARCHAR(512) | S3 object key for WAV |
+| `tts_model` | VARCHAR(100) | Gemini TTS model used |
+| `tts_metadata` | JSONB | Token usage stats |
+| `podcast_script_snapshot` | JSONB | Full script at generation time |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+### `voices`
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | VARCHAR(64) (PK) | Voice ID, e.g. `achernar` |
+| `name` | VARCHAR(128) | Display name |
+| `description` | TEXT | Voice characteristics |
+| `s3_key` | VARCHAR(512) | e.g. `voices/achernar.wav` |
+| `sample_available` | BOOLEAN | `true` after S3 upload / sync |
+| `created_at` | TIMESTAMPTZ | Creation timestamp |
+| `updated_at` | TIMESTAMPTZ | Last update timestamp |
+
+Voices are seeded from `podcast_prompts.py` on application startup.
+
+---
+
+## S3 storage layout
+
+| Resource | S3 key pattern | Example |
+|----------|----------------|---------|
+| Podcast audio | `projects/{project_id}/podcasts/{podcast_id}.wav` | `projects/a1b2.../podcasts/c3d4....wav` |
+| Voice sample | `voices/{voice_id}.wav` | `voices/achernar.wav` |
+
+**Audio URLs** in API responses are either:
+
+- **Presigned URLs** (default) — expire after `PRESIGNED_URL_EXPIRY` seconds
+- **Public URLs** — when `S3_USE_PUBLIC_URLS=true` and bucket policy allows public read
+
+---
+
+## End-to-end workflow
+
+### Step 1 — Create a project
+
+```http
+POST /projects
+Content-Type: application/json
+x-api-key: {key}
+
+{ "name": "Bengali Short Stories" }
+```
+
+Save the returned `id` as `{project_id}`.
+
+### Step 2 — List available voices (optional)
+
+```http
+GET /voices
+x-api-key: {key}
+```
+
+Pick voice IDs for your speakers (e.g. `achernar`, `enceladus`).
+
+### Step 3 — Generate podcast script from document
+
+```http
+POST /projects/{project_id}/generate-podcast-script
+Content-Type: multipart/form-data
+x-api-key: {key}
+
+file: <document.pdf>
+speaker_voices: achernar,enceladus
+num_speakers: 2
+text_model: gemini-2.5-pro        (optional)
+temperature: 0.7                   (optional)
+```
+
+Response contains `podcast_script` — use it in the next step.
+
+### Step 4 — Generate podcast audio
+
+```http
+POST /projects/{project_id}/generate-podcast
+Content-Type: application/json
+x-api-key: {key}
+
+{
+  "podcast_script": { ... },
+  "tts_model": "gemini-2.5-flash-preview-tts"
+}
+```
+
+Response contains `podcast.audio_url` — play or download the WAV.
+
+### Step 5 — List / retrieve podcasts
+
+```http
+GET /projects/{project_id}/podcasts
+GET /projects/{project_id}/podcasts/{podcast_id}
+```
+
+---
+
+## Data models
+
+### PodcastScript (ephemeral)
+
+Returned by script generation; sent back for audio generation.
+
+```json
+{
+  "title": "Episode Title",
+  "description": "Short episode summary",
+  "speakers": [
+    { "name": "Alex", "voice_id": "achernar" },
+    { "name": "Jordan", "voice_id": "enceladus" }
+  ],
+  "dialogue": [
+    { "speaker": "Alex", "text": "Welcome to the show." },
+    { "speaker": "Jordan", "text": "Thanks for having me." }
+  ]
+}
+```
+
+| Field | Type | Rules |
+|-------|------|-------|
+| `title` | string | Required |
+| `description` | string | Required |
+| `speakers` | array | Each speaker has `name` + `voice_id` |
+| `dialogue` | array | Each turn has `speaker` (name) + `text` |
+| `voice_id` | string | Must be one of the [30 voice IDs](#voice-catalog) |
+
+### speaker_voices formats
+
+The `speaker_voices` form field accepts:
+
+| Format | Example |
+|--------|---------|
+| Comma-separated | `achernar,enceladus` |
+| JSON array | `["achernar","enceladus"]` |
+| Single voice | `achernar` |
+
+`num_speakers` must equal the number of voices provided.
+
+---
+
+## API reference
+
+**Endpoint summary (19 routes)**
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/` | No | Service info |
+| GET | `/health` | No | Health + DB status |
+| GET | `/projects` | Yes | List all projects |
+| POST | `/projects` | Yes | Create project |
+| GET | `/projects/{project_id}` | Yes | Get project |
+| PATCH | `/projects/{project_id}` | Yes | Update project |
+| DELETE | `/projects/{project_id}` | Yes | Delete project + S3 podcasts |
+| POST | `/projects/{project_id}/generate-podcast-script` | Yes | Document → script |
+| POST | `/projects/{project_id}/generate-podcast` | Yes | Script → audio |
+| GET | `/projects/{project_id}/podcasts` | Yes | List podcasts |
+| GET | `/projects/{project_id}/podcasts/{podcast_id}` | Yes | Get podcast |
+| DELETE | `/projects/{project_id}/podcasts/{podcast_id}` | Yes | Delete podcast |
+| GET | `/voices` | Yes | List voices + sample URLs |
+| GET | `/voices/sample/{voice_id}` | No | Redirect/serve sample audio |
+| GET | `/models` | Yes | Text + TTS models |
+| GET | `/models/text` | Yes | Text models only |
+| GET | `/models/tts` | Yes | TTS models only |
+| POST | `/models/refresh` | Yes | Force refresh model cache |
+| GET | `/tts-models` | Yes | **Deprecated** — use `/models` |
+
+---
+
+### Health
+
+#### `GET /`
+
+Service metadata. No authentication.
+
+**Response 200**
+
+```json
+{
+  "status": "healthy",
+  "service": "Rankify Podcast API",
+  "version": "2.0.0"
+}
+```
+
+---
+
+#### `GET /health`
+
+Database connectivity and catalog counts. No authentication.
+
+**Response 200**
+
+```json
+{
+  "status": "healthy",
+  "database": true,
+  "available_voices": 30,
+  "text_models": 7,
+  "tts_models": 3
+}
+```
+
+`status` is `"degraded"` when the database is unreachable.
+
+---
+
+### Projects
+
+#### `GET /projects`
+
+List all projects, newest activity first. Includes `podcast_count` and `recent_podcast`.
+
+**Headers:** `x-api-key`
+
+**Response 200**
+
+```json
+{
+  "projects": [
+    {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "name": "Bengali Short Stories",
+      "status": "active",
+      "podcast_count": 2,
+      "recent_podcast": {
+        "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "title": "Episode One",
+        "created_at": "2026-09-01T12:00:00Z",
+        "audio_url": "https://bucket.s3.amazonaws.com/projects/.../podcasts/....wav?..."
+      },
+      "created_at": "2026-09-01T10:00:00Z",
+      "updated_at": "2026-09-01T12:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+#### `POST /projects`
+
+Create a new project.
+
+**Headers:** `x-api-key`  
+**Body:** `application/json`
+
+```json
+{ "name": "My Podcast Project" }
+```
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `name` | string | Yes | 1–255 characters |
+
+**Response 201** — `ProjectResponse` (same shape as list item, `podcast_count: 0`).
+
+---
+
+#### `GET /projects/{project_id}`
+
+Get a single project by UUID.
+
+**Response 200** — `ProjectResponse`  
+**Response 404** — Project not found
+
+---
+
+#### `PATCH /projects/{project_id}`
+
+Partial update.
+
+**Body:** `application/json` (all fields optional)
+
+```json
+{
+  "name": "Renamed Project",
+  "status": "archived"
+}
+```
+
+| Field | Type | Values |
+|-------|------|--------|
+| `name` | string | 1–255 characters |
+| `status` | string | `active` \| `archived` |
+
+**Response 200** — Updated `ProjectResponse`
+
+---
+
+#### `DELETE /projects/{project_id}`
+
+Delete project, all associated podcast DB rows, and all S3 objects under `projects/{project_id}/`.
+
+**Response 204** — No content  
+**Response 404** — Project not found
+
+---
+
+### Generation
+
+#### `POST /projects/{project_id}/generate-podcast-script`
+
+Upload a document and generate a structured podcast script via Gemini.
+
+**Headers:** `x-api-key`  
+**Content-Type:** `multipart/form-data`
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `file` | file | Yes | — | Source document |
+| `speaker_voices` | string | Yes | — | Voice IDs (see [formats](#speaker_voices-formats)) |
+| `num_speakers` | integer | No | `2` | Must match voice count |
+| `text_model` | string | No | Newest from `/models/text` | Gemini text model |
+| `temperature` | float | No | `0.7` | Generation temperature |
+
+**Supported file types:** `.txt`, `.md`, `.pdf`, `.docx`
+
+**Response 200**
+
+```json
+{
+  "success": true,
+  "message": "Podcast script generated successfully",
+  "podcast_script": {
+    "title": "...",
+    "description": "...",
+    "speakers": [...],
+    "dialogue": [...]
+  }
+}
+```
+
+**Errors**
+
+| Status | Cause |
+|--------|-------|
+| 400 | Invalid voices, voice count mismatch, unsupported file, text too short (<10 chars), invalid model |
+| 404 | Project not found |
+| 401 | Invalid API key |
+
+On Gemini failure: `success: false`, `podcast_script: null`.
+
+---
+
+#### `POST /projects/{project_id}/generate-podcast`
+
+Synthesize audio from a `PodcastScript`, upload to S3, and persist a podcast record.
+
+**Headers:** `x-api-key`  
+**Body:** `application/json`
+
+```json
+{
+  "podcast_script": {
+    "title": "Episode Title",
+    "description": "Summary",
+    "speakers": [
+      { "name": "Alex", "voice_id": "achernar" },
+      { "name": "Jordan", "voice_id": "enceladus" }
+    ],
+    "dialogue": [
+      { "speaker": "Alex", "text": "Hello and welcome." },
+      { "speaker": "Jordan", "text": "Great to be here." }
+    ]
+  },
+  "tts_model": "gemini-2.5-flash-preview-tts"
+}
+```
+
+| Field | Type | Required | Default |
+|-------|------|----------|---------|
+| `podcast_script` | PodcastScript | Yes | — |
+| `tts_model` | string | No | `gemini-2.5-flash-preview-tts` |
+
+**Response 200**
+
+```json
+{
+  "success": true,
+  "message": "Podcast generated and saved successfully",
+  "podcast": {
+    "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "project_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "title": "Episode Title",
+    "description": "Summary",
+    "s3_key": "projects/3fa85f64.../podcasts/7c9e6679....wav",
+    "audio_url": "https://bucket.s3.amazonaws.com/...",
+    "tts_model": "gemini-2.5-flash-preview-tts",
+    "tts_metadata": {
+      "input_tokens": 120,
+      "output_tokens": 80,
+      "total_tokens": 200
+    },
+    "podcast_script_snapshot": { "...": "..." },
+    "created_at": "2026-09-01T12:00:00Z",
+    "updated_at": "2026-09-01T12:00:00Z"
+  }
+}
+```
+
+**Errors**
+
+| Status | Cause |
+|--------|-------|
+| 400 | Invalid `voice_id`, invalid TTS model |
+| 404 | Project not found |
+| 500 | TTS or upload failure |
+
+---
+
+### Podcasts
+
+#### `GET /projects/{project_id}/podcasts`
+
+List podcasts for a project, newest first.
+
+**Response 200**
+
+```json
+{
+  "podcasts": [
+    {
+      "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "title": "Episode Title",
+      "description": "Summary",
+      "audio_url": "https://bucket.s3.amazonaws.com/...",
+      "created_at": "2026-09-01T12:00:00Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+#### `GET /projects/{project_id}/podcasts/{podcast_id}`
+
+Full podcast details including `podcast_script_snapshot` and `tts_metadata`.
+
+**Response 200** — `PodcastResponse`  
+**Response 404** — Project or podcast not found
+
+---
+
+#### `DELETE /projects/{project_id}/podcasts/{podcast_id}`
+
+Delete podcast record and S3 audio object.
+
+**Response 204** — No content
+
+---
+
+### Voices
+
+Voice metadata is read from PostgreSQL (one query, no S3 HEAD checks). Presigned `audio_url` values are generated from stored `s3_key`.
+
+#### `GET /voices`
+
+List all 30 Gemini TTS voices with sample URLs.
+
+**Headers:** `x-api-key`
+
+**Response 200**
+
 ```json
 {
   "voices": [
@@ -51,454 +656,247 @@ curl -X GET "http://localhost:8000/voices" \
       "id": "achernar",
       "name": "Achernar",
       "description": "Female, Soft and gentle",
-      "sample_url": "/voices/sample/achernar",
-      "sample_available": true
-    },
-    {
-      "id": "enceladus",
-      "name": "Enceladus",
-      "description": "Male, Breathy and soft-spoken",
-      "sample_url": "/voices/sample/enceladus",
-      "sample_available": true
+      "s3_key": "voices/achernar.wav",
+      "audio_url": "https://rankify-image-generator.s3.amazonaws.com/voices/achernar.wav?AWSAccessKeyId=...",
+      "sample_available": true,
+      "sample_url": "https://rankify-image-generator.s3.amazonaws.com/voices/achernar.wav?..."
     }
-    // ... 30 voices total
   ],
   "total": 30
 }
 ```
 
-### React Usage
-```jsx
-const [voices, setVoices] = useState([]);
-
-useEffect(() => {
-  fetch('http://localhost:8000/voices', {
-    headers: { 'x-api-key': 'dev-api-key-12345' }
-  })
-    .then(res => res.json())
-    .then(data => setVoices(data.voices));
-}, []);
-
-// Play voice sample
-<audio 
-  src={`http://localhost:8000${voice.sample_url}`} 
-  controls 
-/>
-```
+| Field | Description |
+|-------|-------------|
+| `audio_url` | Use this to play the sample (S3 presigned or public URL) |
+| `sample_url` | Deprecated alias of `audio_url` |
+| `sample_available` | `true` when S3 sample exists (or local fallback) |
+| `s3_key` | S3 object path; `null` if sample not on S3 |
 
 ---
 
-## 2. GET /voices/sample/{voice_id} - Voice Sample Audio
+#### `GET /voices/sample/{voice_id}`
 
-### Request
-```bash
-curl -X GET "http://localhost:8000/voices/sample/achernar" \
-  --output achernar.wav
-```
+Play a voice sample. **No API key required.**
 
-Returns: `audio/wav` file (no auth required)
+| Condition | Behavior |
+|-----------|----------|
+| Sample on S3 | `302 Redirect` to presigned/public URL |
+| Local fallback only | `200` — streams `app/voice_samples/{voice_id}.wav` |
+| Not found | `404` |
 
 ---
 
-## 3. GET /tts-models - List Available Models
+### Models
 
-### Request
-```bash
-curl -X GET "http://localhost:8000/tts-models" \
-  -H "x-api-key: dev-api-key-12345"
-```
+Gemini models are fetched from `GET https://generativelanguage.googleapis.com/v1beta/models` and cached for **1 hour**. Up to **10** models per category (text / TTS) are returned, sorted newest first.
 
-### Response
+#### `GET /models`
+
+Returns both text and TTS model lists.
+
+**Response 200**
+
 ```json
 {
+  "text_models": [
+    {
+      "id": "gemini-2.5-pro",
+      "name": "gemini-2.5-pro",
+      "description": "..."
+    }
+  ],
   "tts_models": [
     {
       "id": "gemini-2.5-flash-preview-tts",
-      "name": "Gemini 2.5 Flash TTS",
-      "description": "Fast TTS model, good for quick generation"
-    },
-    {
-      "id": "gemini-2.5-pro-preview-tts",
-      "name": "Gemini 2.5 Pro TTS",
-      "description": "High quality TTS model, better for production"
+      "name": "gemini-2.5-flash-preview-tts",
+      "description": "..."
     }
   ],
-  "text_models": [
-    {
-      "id": "gemini-3-pro-preview",
-      "name": "Gemini 3 Pro Preview",
-      "description": "Latest Gemini model for script generation"
-    }
-  ]
+  "text_total": 7,
+  "tts_total": 3,
+  "limit": 10,
+  "cached_at": "2026-09-01T17:00:00Z"
 }
 ```
 
 ---
 
-## 4. POST /generate-podcast-with-script ⭐ RECOMMENDED
+#### `GET /models/text`
 
-**Best endpoint for React integration** - Returns JSON with script metadata + S3 presigned audio URL.
+Text models for script generation (`generate-podcast-script`).
 
-### Request
+**Response 200**
+
+```json
+{
+  "models": [{ "id": "gemini-2.5-pro", "name": "gemini-2.5-pro", "description": "..." }],
+  "total": 7,
+  "limit": 10,
+  "cached_at": "2026-09-01T17:00:00Z"
+}
+```
+
+When `text_model` is omitted on script generation, the **first model** in this list is used as default.
+
+---
+
+#### `GET /models/tts`
+
+TTS models for audio generation (`generate-podcast`).
+
+**Response 200** — Same shape as `/models/text` with `models` array of TTS models.
+
+---
+
+#### `POST /models/refresh`
+
+Force-refresh the model cache from Gemini (bypasses 1-hour TTL).
+
+**Response 200** — Same as `GET /models`.
+
+---
+
+#### `GET /tts-models` *(deprecated)*
+
+Legacy alias for `GET /models`. Prefer `/models`.
+
+---
+
+## Voice catalog
+
+30 fixed Gemini TTS voice IDs. There is **no Google API** to list these dynamically — this catalog is the source of truth.
+
+| ID | Description |
+|----|-------------|
+| `zephyr` | Female, Bright and clear tone |
+| `puck` | Male, Upbeat and lively |
+| `charon` | Male, Informative and precise |
+| `kore` | Female, Firm and authoritative |
+| `fenrir` | Male, Excitable and energetic |
+| `leda` | Female, Youthful and fresh |
+| `orus` | Male, Firm and commanding |
+| `aoede` | Female, Breezy and relaxed |
+| `callirrhoe` | Female, Easy-going and casual |
+| `autonoe` | Female, Bright and cheerful |
+| `enceladus` | Male, Breathy and soft-spoken |
+| `iapetus` | Male, Clear and articulate |
+| `umbriel` | Male, Easy-going and friendly |
+| `algieba` | Male, Smooth and polished |
+| `despina` | Female, Smooth and elegant |
+| `erinome` | Female, Clear and crisp |
+| `algenib` | Male, Gravelly and rugged |
+| `rasalgethi` | Male, Informative and confident |
+| `laomedeia` | Female, Upbeat and positive |
+| `achernar` | Female, Soft and gentle |
+| `alnilam` | Male, Firm and steady |
+| `schedar` | Male, Even and balanced |
+| `gacrux` | Female, Mature and wise |
+| `pulcherrima` | Male, Forward and assertive |
+| `achird` | Male, Friendly and warm |
+| `zubenelgenubi` | Male, Casual and relaxed |
+| `vindemiatrix` | Female, Gentle and soothing |
+| `sadachbia` | Male, Lively and spirited |
+| `sadaltager` | Male, Knowledgeable and clear |
+| `sulafat` | Female, Warm and inviting |
+
+Voice IDs are **case-insensitive** in API validation.
+
+---
+
+## Error responses
+
+All errors use FastAPI's standard format:
+
+```json
+{
+  "detail": "Human-readable error message"
+}
+```
+
+| HTTP status | Meaning |
+|-------------|---------|
+| 400 | Bad request — validation, invalid voices, unsupported file |
+| 401 | Missing or invalid `x-api-key` |
+| 404 | Project, podcast, or voice not found |
+| 500 | Internal error (TTS failure, unexpected exception) |
+
+---
+
+## cURL examples
+
+Replace `{KEY}` and `{PROJECT_ID}` with your values.
+
+**Health check**
+
 ```bash
-curl -X POST "http://localhost:8000/generate-podcast-with-script" \
+curl http://127.0.0.1:8001/health
+```
+
+**Create project**
+
+```bash
+curl -X POST http://127.0.0.1:8001/projects \
+  -H "x-api-key: {KEY}" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: dev-api-key-12345" \
-  -d '{
-    "input_text": "Your article or content to convert to podcast. This should be substantial text that will be transformed into an engaging conversation between speakers.",
-    "speaker_voices": ["achernar", "enceladus"],
-    "num_speakers": 2,
-    "tts_model": "gemini-2.5-flash-preview-tts",
-    "text_model": "gemini-3-pro-preview",
-    "temperature": 0.7
-  }'
+  -d "{\"name\": \"My Project\"}"
 ```
 
-### Request Body Schema
-```typescript
-interface GeneratePodcastRequest {
-  input_text: string;      // Required, min 10 chars
-  speaker_voices: string[]; // Required, 1-6 voices from /voices
-  num_speakers: number;     // Default: 2, range: 1-6
-  tts_model: string;        // Default: "gemini-2.5-flash-preview-tts"
-  text_model: string;       // Default: "gemini-3-pro-preview"
-  temperature: number;      // Default: 0.7, range: 0.0-1.0
-}
-```
+**List voices**
 
-### Response (Success)
-```json
-{
-  "success": true,
-  "message": "Podcast generated successfully",
-  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "script": {
-    "title": "Understanding AI: A Deep Dive",
-    "description": "A fascinating conversation exploring the latest developments in AI",
-    "speakers": [
-      {"name": "Maya", "voice_id": "achernar"},
-      {"name": "Liam", "voice_id": "enceladus"}
-    ],
-    "dialogue": [
-      {"speaker": "Maya", "text": "Welcome to the show! Today we're diving into..."},
-      {"speaker": "Liam", "text": "Thanks Maya. This is such an exciting topic..."},
-      {"speaker": "Maya", "text": "Absolutely. Let's start with the basics..."}
-    ]
-  },
-  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-e5f6-7890-abcd-ef1234567890.wav?X-Amz-Algorithm=...",
-  "tts_metadata": {
-    "output_file": "/path/to/file.wav",
-    "input_tokens": 1500,
-    "output_tokens": 3000,
-    "total_tokens": 4500
-  }
-}
-```
-
-> **Note:** `audio_url` is now an **S3 presigned URL** (valid for 1 hour).  
-> The frontend can use it directly in an `<audio>` tag or download it.  
-> The `/audio/{job_id}` endpoint still works as a fallback (redirects to S3).
-
-### React Integration
-```jsx
-const generatePodcast = async (inputText, voices) => {
-  setLoading(true);
-  
-  const response = await fetch('http://localhost:8000/generate-podcast-with-script', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': 'dev-api-key-12345'
-    },
-    body: JSON.stringify({
-      input_text: inputText,
-      speaker_voices: voices,
-      num_speakers: voices.length,
-      tts_model: 'gemini-2.5-flash-preview-tts',
-      temperature: 0.7
-    })
-  });
-  
-  const data = await response.json();
-  
-  if (data.success) {
-    setScript(data.script);
-    // audio_url is now an S3 presigned URL - use directly
-    setAudioUrl(data.audio_url);
-  }
-  
-  setLoading(false);
-};
-
-// Display results - audio_url is a full S3 presigned URL
-<div>
-  <h1>{script.title}</h1>
-  <p>{script.description}</p>
-  
-  <audio src={audioUrl} controls crossOrigin="anonymous" />
-  
-  {script.dialogue.map((turn, i) => (
-    <p key={i}><strong>{turn.speaker}:</strong> {turn.text}</p>
-  ))}
-</div>
-```
-
----
-
-## 5. POST /generate-audio-from-script ⭐ TWO-STEP FLOW
-
-**Use this when you want to generate script first, then audio separately.**
-
-This enables a workflow where you can:
-1. Generate script → preview/edit it
-2. Generate audio from the (edited) script → get S3 presigned URL
-
-### Request
 ```bash
-curl -X POST "http://localhost:8000/generate-audio-from-script" \
+curl http://127.0.0.1:8001/voices \
+  -H "x-api-key: {KEY}"
+```
+
+**Generate script from PDF**
+
+```bash
+curl -X POST "http://127.0.0.1:8001/projects/{PROJECT_ID}/generate-podcast-script" \
+  -H "x-api-key: {KEY}" \
+  -F "file=@document.pdf" \
+  -F "speaker_voices=achernar,enceladus" \
+  -F "num_speakers=2" \
+  -F "text_model=gemini-2.5-pro"
+```
+
+**Generate podcast audio**
+
+```bash
+curl -X POST "http://127.0.0.1:8001/projects/{PROJECT_ID}/generate-podcast" \
+  -H "x-api-key: {KEY}" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: dev-api-key-12345" \
-  -d '{
-    "script": {
-      "title": "Truepix AI: The Creative Orchestrator",
-      "description": "Maya and David explore Truepix AI...",
-      "speakers": [
-        {"name": "Maya", "voice_id": "achernar"},
-        {"name": "David", "voice_id": "sadaltager"}
-      ],
-      "dialogue": [
-        {"speaker": "Maya", "text": "You know, I was looking at my browser history yesterday..."},
-        {"speaker": "David", "text": "Let me guess. One for text-to-image, one for video..."}
-      ]
-    },
-    "tts_model": "gemini-2.5-flash-preview-tts"
-  }'
+  -d @podcast_request.json
 ```
 
-### Request Body Schema
-```typescript
-interface GenerateAudioFromScriptRequest {
-  script: {
-    title: string;
-    description: string;
-    speakers: Array<{
-      name: string;
-      voice_id: string;  // Must be a valid voice from /voices
-    }>;
-    dialogue: Array<{
-      speaker: string;  // Must match a speaker name
-      text: string;
-    }>;
-  };
-  tts_model?: string;  // Default: "gemini-2.5-flash-preview-tts"
-}
-```
+**List Gemini models**
 
-### Response (Success)
-```json
-{
-  "success": true,
-  "message": "Audio generated successfully from script",
-  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-...wav?X-Amz-Algorithm=...",
-  "script_title": "Truepix AI: The Creative Orchestrator",
-  "tts_metadata": {
-    "output_file": "/path/to/file.wav",
-    "input_tokens": 1500,
-    "output_tokens": 3000,
-    "total_tokens": 4500
-  }
-}
-```
-
-### React Two-Step Flow Example
-```jsx
-// Step 1: Generate script only
-const generateScript = async (inputText, voices) => {
-  const response = await fetch('http://localhost:8000/generate-script', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': 'dev-api-key-12345'
-    },
-    body: JSON.stringify({
-      input_text: inputText,
-      speaker_voices: voices,
-      num_speakers: voices.length
-    })
-  });
-  
-  const data = await response.json();
-  if (data.success) {
-    setScript(data.script);  // Store for editing/preview
-  }
-};
-
-// Step 2: After user previews/edits, generate audio
-const generateAudio = async (editedScript) => {
-  const response = await fetch('http://localhost:8000/generate-audio-from-script', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': 'dev-api-key-12345'
-    },
-    body: JSON.stringify({
-      script: editedScript,
-      tts_model: 'gemini-2.5-flash-preview-tts'
-    })
-  });
-  
-  const data = await response.json();
-  if (data.success) {
-    // audio_url is now an S3 presigned URL - use directly
-    setAudioUrl(data.audio_url);
-  }
-};
-```
-
----
-
-## 6. POST /generate-podcast - Generate Full Podcast
-
-### Request
-Same request body as `/generate-podcast-with-script`.
-
-### Response (Success)
-```json
-{
-  "success": true,
-  "message": "Podcast generated successfully",
-  "job_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "script": { ... },
-  "audio_url": "https://rankify-image-generator.s3.amazonaws.com/generated-podcast/podcast_a1b2c3d4-...wav?..."
-}
-```
-
-> **Note:** This endpoint now returns JSON with an S3 presigned URL  
-> (previously it returned a streaming audio response).
-
----
-
-## 7. GET /audio/{job_id} - Get Audio by Job ID
-
-### Request
 ```bash
-curl -L -X GET "http://localhost:8000/audio/a1b2c3d4-e5f6-7890-abcd-ef1234567890" \
-  --output podcast.wav
-```
-
-**Behaviour:** Returns a **307 redirect** to the S3 presigned URL.  
-Use `-L` flag with curl to follow redirects. Browsers and `<audio>` tags follow redirects automatically.
-
-### Important Notes on Audio URLs
-
-- Audio files are stored in **AWS S3** under the `generated-podcast/` prefix
-- Presigned URLs are **valid for 1 hour** after generation
-- **Audio files are automatically deleted from S3 after 1 hour** — a background cleanup task runs every 15 minutes and removes any podcast files older than 1 hour
-- Both the presigned URL **and** the actual S3 object expire/get deleted at ~1 hour
-- The `/audio/{job_id}` endpoint generates a **fresh** presigned URL on each request (only works while the file still exists in S3)
-- Frontend should use the `audio_url` from generation responses directly (it's a full S3 presigned URL)
-- The `/audio/{job_id}` endpoint is a convenience fallback that checks S3 and redirects
-
----
-
-## Error Responses
-
-### 401 Unauthorized
-```json
-{
-  "detail": "Invalid API key"
-}
-```
-
-### 400 Bad Request
-```json
-{
-  "detail": "Invalid voice IDs: ['invalid_voice']"
-}
-```
-
-### 404 Not Found (Audio)
-```json
-{
-  "detail": "Audio not found for job ID: ..."
-}
-```
-
-### 500 Internal Server Error
-```json
-{
-  "detail": "Script generation error: ..."
-}
-```
-
-```json
-{
-  "detail": "Failed to upload audio to S3: ..."
-}
+curl http://127.0.0.1:8001/models/text \
+  -H "x-api-key: {KEY}"
 ```
 
 ---
 
-## Running the API
+## Project structure
 
-### Development
-```bash
-cd app
-pip install fastapi uvicorn python-multipart boto3 python-dotenv
-python main.py
-# or
-uvicorn main:app --reload --port 8000
 ```
-
-### Environment Variables
-Create `.env` file:
-```
-GEMINI_API_KEY=your_gemini_api_key
-X_API_KEY=your_custom_api_key  # Optional, defaults to dev-api-key-12345
-
-# AWS S3 Configuration
-AWS_ACCESS_KEY_ID=your_aws_access_key
-AWS_SECRET_ACCESS_KEY=your_aws_secret_key
-AWS_S3_BUCKET_NAME=your_s3_bucket_name
-AWS_REGION=us-east-1
-```
-
-### Swagger UI
-Once running, visit: `http://localhost:8000/docs`
-
----
-
-## CORS Notes
-
-The API is configured with CORS middleware that:
-- Allows all origins (`*`) for MVP development
-- Exposes custom headers: `X-Podcast-Title`, `X-Job-Id`, `Content-Disposition`
-- S3 presigned URLs are **full external URLs** (not same-origin), so they don't trigger CORS issues from the browser — the browser fetches audio directly from S3
-- If your S3 bucket requires CORS, ensure the bucket CORS policy allows GET requests from your frontend origin
-
-### S3 Bucket CORS Policy (if needed)
-```json
-[
-  {
-    "AllowedHeaders": ["*"],
-    "AllowedMethods": ["GET"],
-    "AllowedOrigins": ["*"],
-    "ExposeHeaders": [],
-    "MaxAgeSeconds": 3600
-  }
-]
+app/
+├── main.py              # FastAPI routes
+├── database.py          # PostgreSQL ORM (projects, podcasts, voices)
+├── schemas.py           # Pydantic request/response models
+├── storage.py           # S3 upload, presigned URLs
+├── document_parser.py   # txt, md, pdf, docx extraction
+├── gemini_client.py     # Script generation
+├── gemini_models.py     # Dynamic model discovery + cache
+├── google_tts.py        # Multi-speaker TTS
+├── podcast_prompts.py   # Prompts + voice catalog
+├── schema_adapter.py    # Gemini JSON schema helper
+├── voice_samples/       # Local WAV fallbacks (30 files)
+├── docker-compose.yml   # PostgreSQL service
+└── requirements.txt
 ```
 
 ---
 
-## Typical React Flow
-
-```
-1. On mount: GET /voices → Display voice selector with audio previews
-2. On mount: GET /tts-models → Populate model dropdown
-3. User inputs text, selects voices
-4. On submit: POST /generate-podcast-with-script
-5. Display script dialogue + play audio from S3 presigned URL (audio_url)
-6. Optional: GET /audio/{job_id} → redirects to fresh S3 presigned URL
-```
+*Last updated: September 2026 — API v2.0.0*
