@@ -11,6 +11,7 @@ import { useTtsModels, useVoices } from '../hooks/useCatalog'
 import { useScript } from '../hooks/useScripts'
 import { useVoiceSamplePlayer } from '../hooks/useVoiceSamplePlayer'
 import { applyOptimisticPodcastGeneration } from '../lib/projectItems'
+import { estimateScriptMinutes, formatEstimatedDuration } from '../lib/utils'
 import type { DialogueTurn, PodcastScript } from '../types/api'
 
 export function ScriptReviewPage() {
@@ -117,12 +118,17 @@ export function ScriptReviewPage() {
       .catch(() => qc.invalidateQueries({ queryKey: ['projects', projectId] }))
   }
 
+  const durationLabel = formatEstimatedDuration(estimateScriptMinutes(script.dialogue))
+
   return (
     <AppLayout>
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Review &amp; edit script</h1>
-          <p className="mt-1 text-sm text-gray-500">Adjust dialogue before generating audio</p>
+          <p className="mt-1 text-sm text-gray-500">
+            Adjust dialogue before generating audio
+            {durationLabel ? <> · {durationLabel} from script</> : null}
+          </p>
         </div>
         <Button variant="secondary" onClick={() => navigate(`/projects/${projectId}`)}>
           <ArrowLeft className="h-4 w-4" />

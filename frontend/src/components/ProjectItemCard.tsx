@@ -12,7 +12,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import type { PodcastScript, ProjectItem } from '../types/api'
-import { cn, formatDate } from '../lib/utils'
+import { cn, formatDate, estimateScriptMinutes, formatEstimatedDuration } from '../lib/utils'
 import { Button } from './ui/Button'
 import { Modal } from './ui/Shared'
 import * as podcastsApi from '../api/podcasts'
@@ -185,6 +185,12 @@ export function ProjectItemCard({ item, projectId }: ProjectItemCardProps) {
           {item.script && item.phase === 'script_ready' && (
             <p className="mt-1 text-xs text-gray-400">
               {item.script.dialogue.length} lines · {item.script.speakers.length} speakers
+              {(() => {
+                const label = formatEstimatedDuration(
+                  estimateScriptMinutes(item.script.dialogue),
+                )
+                return label ? <> · {label}</> : null
+              })()}
             </p>
           )}
           {item.description && item.phase === 'script_ready' && (

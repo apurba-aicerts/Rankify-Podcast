@@ -8,10 +8,10 @@ import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
-from gemini_client import build_speaker_voice_mapping, run_gemini_agent
-from google_tts import MultiSpeakerTTS
-from podcast_prompts import podcast_system_instruction
+from gemini_client import build_speaker_voice_mapping
 from schemas import PodcastScript as PodcastScriptSchema
+from script_pipeline import ScriptGenerationError, generate_podcast_script_from_text
+from tts_pipeline import generate_podcast_audio
 
 from database import Podcast, PodcastScriptRecord, Project, SessionLocal, utcnow
 import storage
@@ -36,17 +36,17 @@ async def run_script_generation_task(
         if record is None:
             return
 
-        script = await run_gemini_agent(
-            instruction=podcast_system_instruction(num_speakers, voice_list),
-            user_input=input_text,
-            output_type=PodcastScriptSchema,
-            model=text_model,
-            temperature=temperature,
-        )
-
-        if script is None:
+        try:
+            script = await generate_podcast_script_from_text(
+                input_text=input_text,
+                num_speakers=num_speakers,
+                voice_list=voice_list,
+                text_model=text_model,
+                temperature=temperature,
+            )
+        except ScriptGenerationError as exc:
             record.status = "failed"
-            record.error_message = "Podcast script generation failed"
+            record.error_message = str(exc)
             record.updated_at = utcnow()
             db.commit()
             return
@@ -125,25 +125,17 @@ async def run_podcast_from_script_task(
                 return
 
         speaker_voice_map = build_speaker_voice_mapping(podcast_script)
-        dialogue_text = "\n".join(
-            f"{turn.speaker}: {turn.text}" for turn in podcast_script.dialogue
-        )
-        final_prompt = (
-            f"TTS the following conversation between "
-            f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
-        )
-
         temp_path = APP_OUTPUT_DIR / f"temp_{podcast_id}.wav"
 
         # Run blocking Gemini TTS + S3 upload off the event loop so API
         # requests (dashboard, project polling) stay responsive.
         def _generate_and_upload() -> tuple[dict, str]:
-            tts = MultiSpeakerTTS()
-            result = tts.generate_tts(
-                dialogue=final_prompt,
+            result = generate_podcast_audio(
+                script=podcast_script,
                 speaker_voice_map=speaker_voice_map,
                 tts_model=tts_model,
-                output_file=str(temp_path),
+                output_file=temp_path,
+                work_dir=APP_OUTPUT_DIR,
             )
             if not temp_path.exists():
                 raise RuntimeError("Audio generation failed — no output file")
@@ -161,6 +153,7 @@ async def run_podcast_from_script_task(
                 "input_tokens": tts_result.get("input_tokens"),
                 "output_tokens": tts_result.get("output_tokens"),
                 "total_tokens": tts_result.get("total_tokens"),
+                "tts_chunks": tts_result.get("tts_chunks"),
             }
             podcast.updated_at = utcnow()
 

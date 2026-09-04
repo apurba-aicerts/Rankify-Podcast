@@ -71,6 +71,7 @@ async def run_gemini_agent(
             "response_mime_type": "application/json",
             "response_schema": response_schema,
             "temperature": temperature,
+            "maxOutputTokens": 65536,
         },
     }
 

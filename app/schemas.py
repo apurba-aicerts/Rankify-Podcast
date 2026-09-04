@@ -61,6 +61,41 @@ class PodcastScript(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Outline (generation-only — coverage contract before script writing)
+# ---------------------------------------------------------------------------
+
+
+class OutlinePoint(BaseModel):
+    claim: str = Field(description="One claim, definition, step, finding, or argument from the source")
+    source_hint: str = Field(description="Short heading or quote fragment anchoring the point in the source")
+
+    @field_validator("claim", "source_hint")
+    @classmethod
+    def strip_required(cls, value: str) -> str:
+        return _strip_nonempty(value, "field")
+
+
+class OutlineSection(BaseModel):
+    title: str = Field(description="Section title from the source structure when possible")
+    points: List[OutlinePoint] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        return _strip_nonempty(value, "title")
+
+
+class PodcastOutline(BaseModel):
+    title: str = Field(description="Working title derived from the source")
+    sections: List[OutlineSection] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def strip_title(cls, value: str) -> str:
+        return _strip_nonempty(value, "title")
+
+
+# ---------------------------------------------------------------------------
 # Projects
 # ---------------------------------------------------------------------------
 

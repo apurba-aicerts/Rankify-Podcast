@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from database import Podcast, PodcastScriptRecord, Project, Voice, get_db, init_db
 from document_parser import extract_text
-from gemini_client import build_speaker_voice_mapping, run_gemini_agent
+from gemini_client import build_speaker_voice_mapping
 from generation_tasks import schedule_podcast_generation, schedule_script_generation
 from gemini_models import (
     MODELS_LIMIT,
@@ -39,8 +39,9 @@ from gemini_models import (
     validate_text_model,
     validate_tts_model,
 )
-from google_tts import MultiSpeakerTTS
-from podcast_prompts import podcast_system_instruction, voices as VOICE_DESCRIPTIONS
+from podcast_prompts import voices as VOICE_DESCRIPTIONS
+from script_pipeline import ScriptGenerationError, generate_podcast_script_from_text
+from tts_pipeline import generate_podcast_audio
 from schemas import (
     GeneratePodcastFromScriptRequest,
     GeneratePodcastRequest,
@@ -624,18 +625,18 @@ async def generate_podcast_script(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    script = await run_gemini_agent(
-        instruction=podcast_system_instruction(num_speakers, voice_list),
-        user_input=input_text,
-        output_type=PodcastScript,
-        model=resolved_text_model,
-        temperature=temperature,
-    )
-
-    if script is None:
+    try:
+        script = await generate_podcast_script_from_text(
+            input_text=input_text,
+            num_speakers=num_speakers,
+            voice_list=voice_list,
+            text_model=resolved_text_model,
+            temperature=temperature,
+        )
+    except ScriptGenerationError as exc:
         return GeneratePodcastScriptResponse(
             success=False,
-            message="Podcast script generation failed",
+            message=str(exc),
             podcast_script=None,
         )
 
@@ -674,24 +675,17 @@ async def generate_podcast(
             )
 
     speaker_voice_map = build_speaker_voice_mapping(podcast_script)
-    dialogue_text = "\n".join(
-        f"{turn.speaker}: {turn.text}" for turn in podcast_script.dialogue
-    )
-    final_prompt = (
-        f"TTS the following conversation between "
-        f"{', '.join(speaker_voice_map.keys())}:\n{dialogue_text}"
-    )
 
     podcast_id = uuid.uuid4()
     temp_path = OUTPUT_DIR / f"temp_{podcast_id}.wav"
 
     try:
-        tts = MultiSpeakerTTS()
-        tts_result = tts.generate_tts(
-            dialogue=final_prompt,
+        tts_result = generate_podcast_audio(
+            script=podcast_script,
             speaker_voice_map=speaker_voice_map,
             tts_model=body.tts_model,
-            output_file=str(temp_path),
+            output_file=temp_path,
+            work_dir=OUTPUT_DIR,
         )
 
         if not temp_path.exists():
@@ -711,6 +705,7 @@ async def generate_podcast(
                 "input_tokens": tts_result.get("input_tokens"),
                 "output_tokens": tts_result.get("output_tokens"),
                 "total_tokens": tts_result.get("total_tokens"),
+                "tts_chunks": tts_result.get("tts_chunks"),
             },
             podcast_script_snapshot=podcast_script.model_dump(),
         )

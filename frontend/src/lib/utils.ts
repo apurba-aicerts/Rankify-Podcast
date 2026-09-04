@@ -25,3 +25,21 @@ export function buildInputFile(content: string, episodeTitle: string, file?: Fil
 export function cn(...classes: (string | false | null | undefined)[]) {
   return classes.filter(Boolean).join(' ')
 }
+
+/** Soft duration estimate from dialogue (~140 wpm). Informational only — not a promise. */
+export function estimateScriptMinutes(
+  dialogue: { text: string }[] | null | undefined,
+): number | null {
+  if (!dialogue?.length) return null
+  const words = dialogue.reduce((sum, turn) => {
+    const parts = turn.text.trim().split(/\s+/).filter(Boolean)
+    return sum + parts.length
+  }, 0)
+  if (words === 0) return null
+  return Math.max(1, Math.round(words / 140))
+}
+
+export function formatEstimatedDuration(minutes: number | null): string | null {
+  if (minutes == null) return null
+  return `~${minutes} min estimated`
+}
