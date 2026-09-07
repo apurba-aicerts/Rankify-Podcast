@@ -56,8 +56,8 @@ echo "Waiting for services to become healthy..."
 for ((i=1; i<=MAX_RETRIES; i++)); do
   echo "Checking status (Attempt $i/$MAX_RETRIES)..."
 
-  # Check backend health
-  BE_RESPONSE=$(curl -s -f http://localhost:8750/health 2>/dev/null || true)
+  # Check backend health on port 9800
+  BE_RESPONSE=$(curl -s -f http://localhost:9800/health 2>/dev/null || true)
   if [ -n "$BE_RESPONSE" ]; then
     if echo "$BE_RESPONSE" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
       echo "  [OK] Backend API (and DB connection) is healthy."
@@ -70,8 +70,8 @@ for ((i=1; i<=MAX_RETRIES; i++)); do
     echo "  [...] Backend API is not responding yet."
   fi
 
-  # Check frontend health
-  FE_RESPONSE=$(curl -s -f http://localhost:8760/ 2>/dev/null || true)
+  # Check frontend health on port 9860
+  FE_RESPONSE=$(curl -s -f http://localhost:9860/ 2>/dev/null || true)
   if [ -n "$FE_RESPONSE" ]; then
     if echo "$FE_RESPONSE" | grep -q -i "Rankify"; then
       echo "  [OK] Frontend UI is serving files correctly."
@@ -117,8 +117,8 @@ else
   echo "==========================================="
   echo "SUCCESS: Deployment completed successfully!"
   echo "==========================================="
-  echo "Frontend UI: http://localhost:8760"
-  echo "Backend API: http://localhost:8750"
-  echo "API Docs:    http://localhost:8750/docs"
+  echo "Frontend UI: http://localhost:9860"
+  echo "Backend API: http://localhost:9800"
+  echo "API Docs:    http://localhost:9800/docs"
   echo "==========================================="
 fi

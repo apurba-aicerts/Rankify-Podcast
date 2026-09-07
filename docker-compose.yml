@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "5435:5432"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rankify -d rankify_podcast"]
@@ -23,7 +23,7 @@ services:
       dockerfile: Dockerfile
     container_name: rankify-podcast-backend
     ports:
-      - "8750:9800"
+      - "9800:9800"
     env_file:
       - .env
     environment:
@@ -48,7 +48,7 @@ services:
       dockerfile: Dockerfile
     container_name: rankify-podcast-frontend
     ports:
-      - "8760:80"
+      - "9860:80"
     depends_on:
       - backend
     restart: unless-stopped
