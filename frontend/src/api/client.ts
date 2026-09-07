@@ -1,5 +1,12 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8001'
-const API_KEY = import.meta.env.VITE_API_KEY ?? ''
+const envUrl = import.meta.env.VITE_API_BASE_URL
+const BASE_URL =
+  envUrl && envUrl.trim() !== ''
+    ? envUrl
+    : typeof window !== 'undefined'
+      ? `${window.location.protocol}//${window.location.hostname}:9800`
+      : 'http://127.0.0.1:9800'
+
+const API_KEY = import.meta.env.VITE_API_KEY || 'dev-api-key-12345'
 
 export class ApiError extends Error {
   status: number

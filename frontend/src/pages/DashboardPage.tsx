@@ -139,7 +139,7 @@ export function DashboardPage() {
     return (
       <AppLayout>
         <div className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
-          Failed to load projects. Is the API running on port 8001?
+          Failed to load projects. Ensure the backend API is running and accessible on port 9800.
         </div>
       </AppLayout>
     )
