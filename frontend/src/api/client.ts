@@ -6,7 +6,7 @@ const BASE_URL =
       ? `${window.location.protocol}//${window.location.hostname}:9800`
       : 'http://127.0.0.1:9800'
 
-const API_KEY = import.meta.env.VITE_API_KEY || 'dev-api-key-12345'
+const API_KEY = import.meta.env.VITE_API_KEY || 'AICERTS@123'
 
 export class ApiError extends Error {
   status: number

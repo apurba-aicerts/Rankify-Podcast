@@ -28,6 +28,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://rankify:rankify@postgres:5432/rankify_podcast
+      X_API_KEY: AICERTS@123
     volumes:
       - ./app/outputs:/app/outputs
       - ./app/voice_samples:/app/voice_samples:ro
