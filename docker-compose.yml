@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: rankify-podcast-db
+    environment:
+      POSTGRES_USER: rankify
+      POSTGRES_PASSWORD: rankify
+      POSTGRES_DB: rankify_podcast
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rankify -d rankify_podcast"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: rankify-podcast-backend
+    ports:
+      - "8750:9800"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://rankify:rankify@postgres:5432/rankify_podcast
+    volumes:
+      - ./app/outputs:/app/outputs
+      - ./app/voice_samples:/app/voice_samples:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9800/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: rankify-podcast-frontend
+    ports:
+      - "8760:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  pgdata:
