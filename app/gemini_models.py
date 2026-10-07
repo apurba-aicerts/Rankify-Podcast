@@ -14,7 +14,7 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 BASE_API_URL = "https://generativelanguage.googleapis.com/v1beta"
-MODELS_LIMIT = int(os.getenv("GEMINI_MODELS_LIMIT", "10"))
+MODELS_LIMIT = int(os.getenv("GEMINI_MODELS_LIMIT", "100"))
 CACHE_TTL_SECONDS = int(os.getenv("GEMINI_MODELS_CACHE_TTL", "3600"))
 
 TEXT_EXCLUDE = (
@@ -33,8 +33,8 @@ TEXT_EXCLUDE = (
     "aqa",
     "clip",
     "customtools",
-    "lite",
-    "-latest",
+    # "lite",
+    # "-latest",
 )
 
 TEXT_FALLBACK: list[dict[str, str]] = [
