@@ -23,6 +23,7 @@ APP_OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 async def run_script_generation_task(
+    title: str,
     script_id: UUID,
     input_text: str,
     num_speakers: int,
@@ -52,7 +53,7 @@ async def run_script_generation_task(
             return
 
         record.script = script.model_dump()
-        record.title = script.title
+        record.title = title
         record.description = script.description
         record.status = "ready"
         record.error_message = None
@@ -108,7 +109,7 @@ async def run_podcast_from_script_task(
                 id=podcast_id,
                 project_id=project_id,
                 script_id=script_id,
-                title=podcast_script.title,
+                title=record.title,
                 description=podcast_script.description,
                 status="generating",
                 s3_key=None,
@@ -181,6 +182,7 @@ async def run_podcast_from_script_task(
 
 
 def schedule_script_generation(
+    title: str,
     script_id: UUID,
     input_text: str,
     num_speakers: int,
@@ -190,7 +192,7 @@ def schedule_script_generation(
 ) -> None:
     asyncio.create_task(
         run_script_generation_task(
-            script_id, input_text, num_speakers, voice_list, text_model, temperature
+            title, script_id, input_text, num_speakers, voice_list, text_model, temperature
         )
     )
 

@@ -141,6 +141,7 @@ class ProjectUpdate(BaseModel):
 
 class ProjectCounts(BaseModel):
     finished_podcasts: int = 0
+    in_progress: int = 0
     unfinished: int = 0
     total_items: int = 0
 

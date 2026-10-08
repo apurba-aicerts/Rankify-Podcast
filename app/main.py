@@ -296,9 +296,28 @@ def compute_project_counts(db: Session, project_id: UUID) -> ProjectCounts:
         .scalar()
         or 0
     )
+    # Items actively running
+    in_progress_scripts = (
+        db.query(func.count(PodcastScriptRecord.id))
+        .filter(
+            PodcastScriptRecord.project_id == project_id,
+            PodcastScriptRecord.status == "generating",
+        )
+        .scalar()
+        or 0
+    )
+    in_progress_podcasts = (
+        db.query(func.count(Podcast.id))
+        .filter(Podcast.project_id == project_id, Podcast.status == "generating")
+        .scalar()
+        or 0
+    )
+    in_progress = in_progress_scripts + in_progress_podcasts
+
     unfinished = unfinished_scripts + unfinished_podcasts
     return ProjectCounts(
         finished_podcasts=finished_podcasts,
+        in_progress=in_progress,
         unfinished=unfinished,
         total_items=unfinished + finished_podcasts,
     )
@@ -487,6 +506,7 @@ async def list_projects(
     summaries = [project_to_summary(db, p) for p in projects]
     totals = ProjectCounts(
         finished_podcasts=sum(s.counts.finished_podcasts for s in summaries),
+        in_progress=sum(s.counts.in_progress for s in summaries),
         unfinished=sum(s.counts.unfinished for s in summaries),
         total_items=sum(s.counts.total_items for s in summaries),
     )
@@ -913,8 +933,8 @@ async def create_script(
 
     input_text = parse_uploaded_document(file.filename or "upload.txt", file.file)
 
-    if episode_title and episode_title.strip():
-        input_text = f"Episode title: {episode_title.strip()}\n\n{input_text}"
+    # if episode_title and episode_title.strip():
+    #     input_text = f"Episode title: {episode_title.strip()}\n\n{input_text}"
 
     if len(input_text.strip()) < 10:
         raise HTTPException(status_code=400, detail="Document text too short (min 10 chars)")
@@ -946,6 +966,7 @@ async def create_script(
     db.refresh(record)
 
     schedule_script_generation(
+        record.title,
         record.id,
         input_text,
         num_speakers,
@@ -1084,7 +1105,7 @@ async def generate_podcast_from_script(
                     detail=f"Invalid voice_id '{speaker.voice_id}'",
                 )
         record.script = body.script.model_dump()
-        record.title = body.script.title
+        # record.title = body.script.title
         record.description = body.script.description
         record.tts_model = tts_model
         record.updated_at = datetime.now(timezone.utc)
@@ -1107,7 +1128,7 @@ async def generate_podcast_from_script(
         id=podcast_id,
         project_id=project_id,
         script_id=script_id,
-        title=podcast_script.title,
+        title=record.title,
         description=podcast_script.description,
         status="generating",
         s3_key=None,
@@ -1261,3 +1282,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    print("python -m uvicorn main:app --reload --port 8000")
